@@ -1,0 +1,207 @@
+version: '3.8'
+
+services:
+  # MySQL 8.0 Database
+  db:
+    image: mysql:8.0
+    container_name: omnichannel_crm_db
+    restart: unless-stopped
+    environment:
+      # Эти переменные автоматически создадут базу данных и пользователя при первом запуске
+      MYSQL_DATABASE: ${DB_NAME:-omnichannel_crm}
+      MYSQL_USER: ${DB_USER:-crm_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-crm_password}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # Скрипт init.sql выполнится автоматически при первом запуске контейнера
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    command: --default-authentication-plugin=mysql_native_password --innodb-buffer-pool-size=1G --max-connections=500 --innodb-log-file-size=256M
+    networks:
+      - crm_network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-root_password}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s  # Даем больше времени на инициализацию
+
+  # Redis для Celery и Channels
+  redis:
+    image: redis:7-alpine
+    container_name: omnichannel_crm_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - crm_network
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Django приложение (основной сервер)
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omnichannel_crm_web
+    restart: unless-stopped
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+      - sessions_volume:/app/sessions
+      - logs_volume:/app/logs
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - crm_network
+
+  # Celery Worker для фоновых задач (обработка медиа, сообщений)
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omnichannel_crm_celery_worker
+    restart: unless-stopped
+    command: celery -A CRM worker --loglevel=info --concurrency=4 --max-tasks-per-child=1000
+    volumes:
+      - .:/app
+      - media_volume:/app/media
+      - logs_volume:/app/logs
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+      - web
+    networks:
+      - crm_network
+
+  # Celery Beat для периодических задач (очистка старых сообщений)
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omnichannel_crm_celery_beat
+    restart: unless-stopped
+    command: celery -A CRM beat --loglevel=info
+    volumes:
+      - .:/app
+      - logs_volume:/app/logs
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+      - web
+    networks:
+      - crm_network
+
+  # Django Channels ASGI сервер (для WebSockets)
+  daphne:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omnichannel_crm_daphne
+    restart: unless-stopped
+    command: daphne -b 0.0.0.0 -p 8001 CRM.asgi:application
+    volumes:
+      - .:/app
+      - logs_volume:/app/logs
+    ports:
+      - "${DAPHNE_PORT:-8001}:8001"
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - db
+      - redis
+      - web
+    networks:
+      - crm_network
+
+  # Сервис мониторинга здоровья
+  health_monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omnichannel_crm_health_monitor
+    restart: unless-stopped
+    command: python manage.py start_health_monitor --daemon
+    volumes:
+      - .:/app
+      - logs_volume:/app/logs
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - db
+      - redis
+      - web
+    networks:
+      - crm_network
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  static_volume:
+    driver: local
+  media_volume:
+    driver: local
+  sessions_volume:
+    driver: local
+  logs_volume:
+    driver: local
+
+networks:
+  crm_network:
+    driver: bridge

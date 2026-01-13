@@ -1,0 +1,67 @@
+{% extends "admin/base_site.html" %}
+{% load admin_urls %}
+
+{% block title %}Verify OTP for {{ account.name }}{% endblock %}
+
+{% block content %}
+<div id="content-main">
+    <div class="module">
+        <h2>Verify OTP Code for {{ account.name }}</h2>
+
+        <div class="form-row">
+            <p><strong>Phone Number:</strong> {{ account.phone_number }}</p>
+            <p><strong>Status:</strong> {{ account.get_status_display }}</p>
+        </div>
+
+        <div class="form-row">
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
+                <h3 style="margin-top: 0; color: #495057;">Информация о верификации</h3>
+                <p><strong>Если SMS не пришел:</strong></p>
+                <ul style="margin: 10px 0; padding-left: 20px;">
+                    <li>Проверьте Telegram приложение на этом устройстве</li>
+                    <li>Может прийти звонок с кодом</li>
+                    <li>Или пропущенный звонок (код в номере звонящего)</li>
+                    <li>Если ничего не работает, используйте кнопку "Resend Code" в админке</li>
+                </ul>
+                <p style="color: #17a2b8;">
+                    <strong>Шаги:</strong><br>
+                    1. Убедитесь что вы запустили аутентификацию<br>
+                    2. Получите код из Telegram (SMS/приложение/звонок)<br>
+                    3. Введите код здесь для верификации<br>
+                    4. <strong>Автоматика</strong>: Система сама обработает истекшие коды и ошибки
+                </p>
+                <p style="color: #6c757d; font-size: 14px;">
+                    В России и некоторых других странах SMS часто не доставляется.
+                    Telegram предлагает альтернативные методы верификации.
+                    Коды действуют ограниченное время (обычно 5-10 минут).
+                </p>
+            </div>
+        </div>
+
+        <form method="post" action="">
+            {% csrf_token %}
+
+            <div class="form-row">
+                <label for="otp_code">OTP Code:</label>
+                <input type="text" name="otp_code" id="otp_code" required
+                       placeholder="Enter code from Telegram"
+                       style="padding: 5px; font-size: 14px;">
+                <p class="help">Enter the verification code you received in Telegram</p>
+            </div>
+
+            <div class="form-row">
+                <label for="password">Password (for 2FA):</label>
+                <input type="password" name="password" id="password"
+                       placeholder="Leave empty if no 2FA">
+                <p class="help">Only fill if you have two-factor authentication enabled</p>
+            </div>
+
+            <div class="submit-row">
+                <input type="submit" value="Verify OTP" class="default">
+                <a href="{% url 'admin:crm_app_telegramaccount_change' account.id %}"
+                   class="button">Cancel</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
