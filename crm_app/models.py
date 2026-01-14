@@ -70,11 +70,6 @@ class TelegramAccount(models.Model):
         blank=True,
         verbose_name="Username бота"
     )
-    webhook_url = models.URLField(
-        null=True,
-        blank=True,
-        verbose_name="URL для webhook"
-    )
     
     # Метаданные
     telegram_user_id = models.BigIntegerField(

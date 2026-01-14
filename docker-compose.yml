@@ -188,6 +188,39 @@ services:
     networks:
       - crm_network
 
+  # Nginx reverse proxy with SSL
+  nginx:
+    image: nginx:alpine
+    container_name: omnichannel_crm_nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTP_PORT:-80}:80"
+      - "8080:8080"  # Health check port
+    volumes:
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/ssl/crm.crt:/etc/ssl/certs/crm.crt:ro
+      - ./docker/ssl/crm.key:/etc/ssl/private/crm.key:ro
+      # Mount custom certificates if they exist
+      - ${SSL_CERT_PATH:-./docker/ssl/crm.crt}:/etc/ssl/certs/custom.crt:ro
+      - ${SSL_KEY_PATH:-./docker/ssl/crm.key}:/etc/ssl/private/custom.key:ro
+      - static_volume:/app/staticfiles:ro
+      - media_volume:/app/media:ro
+    env_file:
+      - .env
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
+    depends_on:
+      - web
+      - daphne
+    networks:
+      - crm_network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
 volumes:
   mysql_data:
     driver: local

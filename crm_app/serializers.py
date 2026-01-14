@@ -18,7 +18,7 @@ class TelegramAccountSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'account_type', 'account_type_display', 'status', 'status_display',
             'phone_number', 'api_id', 'api_hash', 'session_string',
-            'bot_token', 'bot_username', 'webhook_url',
+            'bot_token', 'bot_username',
             'telegram_user_id', 'first_name', 'last_name', 'username',
             'created_at', 'updated_at', 'last_activity',
             'last_error', 'error_count'

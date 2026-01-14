@@ -28,7 +28,7 @@ class TelegramAccountAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
         ('Бот (pyTelegramBotAPI)', {
-            'fields': ('bot_token', 'bot_username', 'webhook_url'),
+            'fields': ('bot_token', 'bot_username'),
             'classes': ('collapse',)
         }),
         ('Метаданные', {

@@ -194,6 +194,78 @@ docker-compose logs -f
 docker-compose down
 ```
 
+## 🔒 HTTPS Configuration
+
+The system now supports HTTPS with custom domains and SSL certificates.
+
+### Quick HTTPS Setup
+
+1. **Run the HTTPS setup script**:
+```bash
+chmod +x setup_https.sh
+./setup_https.sh
+```
+
+2. **Follow the prompts** to:
+   - Enter your domain name
+   - Choose between self-signed certificates (development) or existing certificates (production)
+
+3. **Update DNS** to point your domain to this server
+
+4. **Start with HTTPS**:
+```bash
+docker-compose up -d
+```
+
+Your CRM will be available at: `https://yourdomain.com`
+
+### Manual HTTPS Configuration
+
+1. **Edit `.env` file**:
+```bash
+cp env.example .env
+# Edit .env with your domain and certificate settings
+```
+
+2. **Environment variables for HTTPS**:
+```bash
+# Domain configuration
+DOMAIN=yourdomain.com
+CUSTOM_DOMAIN=yourdomain.com
+
+# SSL certificates
+SSL_CERT=custom.crt          # Certificate filename
+SSL_KEY=custom.key           # Private key filename
+SSL_CERT_PATH=/path/to/cert  # Full path to certificate
+SSL_KEY_PATH=/path/to/key    # Full path to private key
+
+# Security settings (set to True in production)
+SECURE_SSL_REDIRECT=True
+SESSION_COOKIE_SECURE=True
+CSRF_COOKIE_SECURE=True
+```
+
+3. **Place your certificates** in `docker/ssl/` directory or mount them via environment variables.
+
+### Production SSL Certificates
+
+For production, use Let's Encrypt or commercial certificates:
+
+```bash
+# Using Let's Encrypt (run on your server)
+chmod +x docker/ssl/generate_letsencrypt.sh
+DOMAIN=yourdomain.com LETSENCRYPT_EMAIL=admin@yourdomain.com ./docker/ssl/generate_letsencrypt.sh
+```
+
+### Security Features
+
+- ✅ HTTP to HTTPS automatic redirect
+- ✅ HSTS headers
+- ✅ Secure cookies
+- ✅ CORS protection
+- ✅ Security headers (CSP, X-Frame-Options, etc.)
+- ✅ WebSocket SSL support
+
 ### Локальная разработка (альтернативный способ)
 
 1. **Запуск зависимостей через Docker**:
@@ -359,7 +431,6 @@ curl -X POST http://localhost:8000/api/accounts/ \
     "account_type": "bot",
     "bot_token": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
     "bot_username": "my_bot",
-    "webhook_url": "https://your-bot-url.com/webhook"
   }'
 ```
 
@@ -563,7 +634,7 @@ docker-compose exec web python manage.py createsuperuser
 - Возможные методы: APP (приложение), CALL (звонок), FLASH_CALL (пропущенный)
 
 **Для ботов:**
-1. ✅ Создайте аккаунт в админке с bot_token/bot_username/webhook_url
+1. ✅ Создайте аккаунт в админке с bot_token/bot_username
 2. ✅ Бот сразу готов к работе
 
 **Ручная аутентификация (если нужно):**

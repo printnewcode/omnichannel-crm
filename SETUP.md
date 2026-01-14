@@ -218,12 +218,10 @@ curl -X POST http://localhost:8000/api/accounts/ \
 import requests
 
 # Настройка webhook на CRM
-webhook_url = "https://your-crm-domain.com/api/webhook/bot/?token=BOT_TOKEN"
 
 # Отправка обновлений в CRM
 def forward_to_crm(update):
     response = requests.post(
-        webhook_url,
         json=update.to_dict(),
         headers={"X-Bot-Token": "BOT_TOKEN"}
     )
