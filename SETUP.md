@@ -330,7 +330,7 @@ celery -A CRM events
 1. Проверьте, что Redis запущен: `redis-cli ping`
 2. Проверьте `REDIS_HOST` и `REDIS_PORT` в `.env`
 
-### Проблема: Hydrogram клиент не запускается
+### Проблема: Telethon клиент не запускается
 
 **Решение**:
 1. Проверьте, что session_string сохранен в БД
@@ -458,7 +458,7 @@ mysqldump -u crm_user -p omnichannel_crm > backup_$(date +%Y%m%d_%H%M%S).sql
 mysql -u crm_user -p omnichannel_crm < backup_20240101_120000.sql
 ```
 
-### Сессии Hydrogram
+### Сессии Telethon
 
 ```bash
 # Архивирование сессий
@@ -471,5 +471,5 @@ tar -czf sessions_backup_$(date +%Y%m%d).tar.gz sessions/
 - [Django REST Framework](https://www.django-rest-framework.org/)
 - [Django Channels](https://channels.readthedocs.io/)
 - [Celery Documentation](https://docs.celeryproject.org/)
-- [Hydrogram Documentation](https://hydrogram.org/)
+- [Telethon Documentation](https://docs.telethon.dev/)
 - [Telegram Bot API](https://core.telegram.org/bots/api)

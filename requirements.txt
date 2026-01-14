@@ -20,7 +20,9 @@ redis>=5.0.0
 PyMySQL>=1.1.0
 
 # Telegram API клиенты
-hydrogram>=0.2.0  # Для личных аккаунтов (MTProto)
+telethon>=1.38.0  # Для личных аккаунтов (MTProto)
+qrcode>=7.4.2  # Для QR-кода (Telethon QR login)
+pillow>=10.0.0  # Для генерации QR PNG
 requests>=2.31.0  # Для Bot API
 aiohttp>=3.9.0  # Для асинхронных HTTP запросов
 

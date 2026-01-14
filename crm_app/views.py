@@ -32,7 +32,7 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
     """
     ViewSet для управления Telegram аккаунтами
     """
-    queryset = TelegramAccount.objects.all()
+    queryset = TelegramAccount.objects.all().order_by('-id')
     serializer_class = TelegramAccountSerializer
     permission_classes = [permissions.IsAuthenticated]
     
@@ -42,7 +42,7 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
         account = self.get_object()
         
         if account.account_type == TelegramAccount.AccountType.PERSONAL:
-            # Запуск Hydrogram клиента
+            # Запуск Telethon клиента
             manager = TelegramClientManager()
             try:
                 loop = asyncio.new_event_loop()
@@ -136,7 +136,7 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def authenticate(self, request):
         """
-        Начало процесса авторизации Hydrogram аккаунта
+        Начало процесса авторизации Telethon аккаунта
         Пользователь отправляет телефон, получает OTP код
         """
         phone_number = request.data.get('phone_number')

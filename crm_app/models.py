@@ -12,7 +12,7 @@ class TelegramAccount(models.Model):
     """Модель для хранения данных Telegram аккаунтов (личные аккаунты и боты)"""
     
     class AccountType(models.TextChoices):
-        PERSONAL = 'personal', 'Личный аккаунт (Hydrogram)'
+        PERSONAL = 'personal', 'Личный аккаунт (Telethon)'
         BOT = 'bot', 'Бот (pyTelegramBotAPI)'
     
     class AccountStatus(models.TextChoices):
@@ -35,7 +35,7 @@ class TelegramAccount(models.Model):
         verbose_name="Статус"
     )
     
-    # Для личных аккаунтов (Hydrogram)
+    # Для личных аккаунтов (Telethon)
     phone_number = models.CharField(
         max_length=20,
         null=True,
@@ -53,7 +53,35 @@ class TelegramAccount(models.Model):
     session_string = models.TextField(
         null=True,
         blank=True,
-        help_text="StringSession для Hydrogram"
+        help_text="StringSession для Telethon"
+    )
+    pending_session_string = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Временная StringSession для этапа отправки OTP"
+    )
+    pending_session_name = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Имя временной сессии для OTP (файловая сессия)"
+    )
+    pending_phone_code_hash = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Хэш кода подтверждения (OTP)"
+    )
+    pending_code_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Время отправки OTP"
+    )
+    pending_code_type = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        help_text="Тип OTP (SMS/APP/CALL/FLASH_CALL)"
     )
     
     # Для ботов

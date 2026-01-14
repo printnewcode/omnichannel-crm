@@ -21,7 +21,7 @@ SECRET_KEY = config('SECRET_KEY', default='django-insecure-e(v17v9%x0+=x7hm*4x@*
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=True, cast=bool)
 
-ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv())
+ALLOWED_HOSTS = ["*"]
 
 
 # Application definition
@@ -152,7 +152,7 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
-# Сессии Hydrogram
+# Сессии Telethon
 SESSIONS_DIR = BASE_DIR / 'sessions'
 SESSIONS_DIR.mkdir(exist_ok=True)
 
@@ -278,7 +278,7 @@ LOGGING = {
             'level': 'DEBUG',
             'propagate': False,
         },
-        'hydrogram': {
+        'telethon': {
             'handlers': ['console', 'file'],
             'level': 'INFO',
             'propagate': False,

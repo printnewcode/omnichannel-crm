@@ -204,11 +204,11 @@ def download_media(
                 logger.error(f"Failed to download media: {file_response.status_code}")
                 return
         
-        # Для Hydrogram используем async загрузку через клиент
+        # Для Telethon используем async загрузку через клиент
         # Это будет обработано в обработчике сообщений
         elif account.account_type == TelegramAccount.AccountType.PERSONAL:
-            logger.warning("Media download for Hydrogram should be handled in message handler")
-            # TODO: Реализовать загрузку через Hydrogram клиент
+            logger.warning("Media download for Telethon should be handled in message handler")
+            # TODO: Реализовать загрузку через Telethon клиент
         
     except Exception as e:
         logger.exception(f"Error downloading media: {e}")

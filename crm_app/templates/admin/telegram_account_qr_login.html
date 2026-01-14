@@ -1,0 +1,63 @@
+{% extends "admin/base_site.html" %}
+{% load admin_urls %}
+
+{% block title %}QR Login for {{ account.name }}{% endblock %}
+
+{% block content %}
+<div id="content-main">
+    <div class="module">
+        <h2>QR Login for {{ account.name }}</h2>
+
+        <div class="form-row">
+            <p><strong>Phone Number:</strong> {{ account.phone_number }}</p>
+            <p><strong>Status:</strong> {{ account.get_status_display }}</p>
+        </div>
+
+        {% if status_message %}
+        <div class="form-row">
+            <p style="color: #17a2b8;"><strong>{{ status_message }}</strong></p>
+        </div>
+        {% endif %}
+
+        <div class="form-row">
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
+                <h3 style="margin-top: 0; color: #495057;">Инструкция</h3>
+                <ol style="margin: 10px 0; padding-left: 20px;">
+                    <li>Откройте Telegram на телефоне</li>
+                    <li>Перейдите: Settings → Devices → Scan QR Code</li>
+                    <li>Отсканируйте QR код ниже</li>
+                    <li>Нажмите "Проверить" чтобы завершить вход</li>
+                </ol>
+            </div>
+        </div>
+
+        {% if qr_image_b64 %}
+        <div class="form-row" style="text-align: center;">
+            <img src="data:image/png;base64,{{ qr_image_b64 }}" alt="QR Login" style="max-width: 280px; border: 1px solid #ddd; padding: 10px; background: #fff;">
+            {% if qr_url %}
+            <p style="margin-top: 10px; font-size: 12px; color: #6c757d;">Если QR не сканируется, откройте ссылку вручную: {{ qr_url }}</p>
+            {% endif %}
+        </div>
+        {% else %}
+        <div class="form-row">
+            <p style="color: #dc3545;">Не удалось создать QR код. Попробуйте "Обновить QR".</p>
+        </div>
+        {% endif %}
+
+        <form method="post" action="">
+            {% csrf_token %}
+            <div class="form-row">
+                <label for="password">Password (for 2FA):</label>
+                <input type="password" name="password" id="password"
+                       placeholder="Leave empty if no 2FA">
+                <p class="help">Заполняйте только если включена двухфакторная аутентификация</p>
+            </div>
+            <div class="submit-row">
+                <button type="submit" name="action" value="check" class="default">Проверить</button>
+                <button type="submit" name="action" value="refresh">Обновить QR</button>
+                <a href="{% url 'admin:crm_app_telegramaccount_change' account.id %}" class="button">Назад</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

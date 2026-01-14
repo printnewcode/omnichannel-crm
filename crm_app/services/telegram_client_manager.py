@@ -1,15 +1,29 @@
 """
-Менеджер для управления множественными Hydrogram клиентами
+Менеджер для управления множественными Telethon клиентами
 Обрабатывает динамическое создание, запуск и остановку клиентов
 """
 import asyncio
 import logging
+import os
+import threading
 from typing import Dict, Optional, List
 from django.conf import settings
 from django.utils import timezone
 from asgiref.sync import sync_to_async
-from hydrogram import Client
-from hydrogram.errors import FloodWait, AuthKeyUnregistered, UserDeactivated
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
+from telethon.errors import (
+    FloodWaitError,
+    AuthKeyUnregisteredError,
+    UserDeactivatedError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
+    SessionPasswordNeededError,
+    PhoneNumberInvalidError,
+    PhoneNumberBannedError,
+    PhoneNumberUnoccupiedError,
+    ApiIdInvalidError,
+)
 from ..models import TelegramAccount
 
 logger = logging.getLogger(__name__)
@@ -17,14 +31,16 @@ logger = logging.getLogger(__name__)
 
 class TelegramClientManager:
     """
-    Singleton менеджер для управления несколькими Hydrogram клиентами
+    Singleton менеджер для управления несколькими Telethon клиентами
     Работает в асинхронном режиме внутри Django
     """
     
     _instance: Optional['TelegramClientManager'] = None
-    _clients: Dict[int, Client] = {}
+    _clients: Dict[int, TelegramClient] = {}
+    _qr_logins: Dict[int, dict] = {}
     _tasks: Dict[int, asyncio.Task] = {}
     _loop: Optional[asyncio.AbstractEventLoop] = None
+    _loop_thread: Optional[threading.Thread] = None
     
     def __new__(cls):
         if cls._instance is None:
@@ -45,20 +61,31 @@ class TelegramClientManager:
                 self._loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(self._loop)
         return self._loop
+
+    def _ensure_background_loop(self) -> asyncio.AbstractEventLoop:
+        """Ensure a persistent background loop for long-lived clients."""
+        if self._loop and self._loop.is_running():
+            return self._loop
+
+        self._loop = asyncio.new_event_loop()
+
+        def runner(loop: asyncio.AbstractEventLoop):
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        self._loop_thread = threading.Thread(target=runner, args=(self._loop,), daemon=True)
+        self._loop_thread.start()
+        return self._loop
     
     def start_client_sync(self, account: TelegramAccount) -> bool:
         """Sync wrapper for start_client"""
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(self.start_client(account))
-        finally:
-            loop.close()
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(self.start_client(account), loop)
+        return future.result()
 
     async def start_client(self, account: TelegramAccount) -> bool:
         """
-        Запустить Hydrogram клиент для аккаунта
+        Запустить Telethon клиент для аккаунта
 
         Args:
             account: TelegramAccount модель
@@ -82,17 +109,21 @@ class TelegramClientManager:
             return False
 
         try:
-            # Создание клиента Hydrogram
-            client = Client(
-                name=f"account_{account.id}",
-                api_id=account.api_id,
-                api_hash=account.api_hash,
-                session_string=account.session_string if account.session_string else None,
-                workdir=str(settings.BASE_DIR / 'sessions'),
+            # Создание клиента Telethon
+            client = TelegramClient(
+                StringSession(account.session_string),
+                account.api_id,
+                account.api_hash,
             )
 
-            # Запуск клиента
-            await client.start()
+            await client.connect()
+            if not await client.is_user_authorized():
+                account.status = TelegramAccount.AccountStatus.ERROR
+                account.last_error = "Сессия недействительна. Требуется повторная авторизация"
+                account.session_string = None
+                await sync_to_async(account.save)()
+                await client.disconnect()
+                return False
 
             # Получение информации о пользователе
             me = await client.get_me()
@@ -105,14 +136,16 @@ class TelegramClientManager:
             account.last_error = None
             account.error_count = 0
 
-            # Сохранение session string если его не было
-            if not account.session_string:
-                account.session_string = await client.export_session_string()
+            # Сохранение session string (Telethon)
+            account.session_string = client.session.save()
 
             await sync_to_async(account.save)()
 
-            # Регистрация обработчиков
-            client.add_handler(self._create_message_handler(account))
+            # Регистрация обработчиков (входящие и исходящие)
+            client.add_event_handler(
+                self._create_message_handler(account),
+                events.NewMessage()
+            )
 
             # Сохранение клиента и запуск задачи прослушивания
             self._clients[account.id] = client
@@ -125,22 +158,22 @@ class TelegramClientManager:
             logger.info(f"Successfully started client for account {account.id}")
             return True
 
-        except AuthKeyUnregistered:
+        except AuthKeyUnregisteredError:
             logger.error(f"Auth key unregistered for account {account.id}")
             account.status = TelegramAccount.AccountStatus.ERROR
             account.last_error = "Сессия недействительна. Требуется повторная авторизация"
             account.session_string = None  # Сброс сессии
             await sync_to_async(account.save)()
             return False
-        except UserDeactivated:
+        except UserDeactivatedError:
             logger.error(f"User deactivated for account {account.id}")
             account.status = TelegramAccount.AccountStatus.ERROR
             account.last_error = "Аккаунт деактивирован"
             await sync_to_async(account.save)()
             return False
-        except FloodWait as e:
-            logger.warning(f"FloodWait for account {account.id}: {e.value} seconds")
-            account.last_error = f"FloodWait: {e.value} секунд"
+        except FloodWaitError as e:
+            logger.warning(f"FloodWait for account {account.id}: {e.seconds} seconds")
+            account.last_error = f"FloodWait: {e.seconds} секунд"
             await sync_to_async(account.save)()
             return False
         except Exception as e:
@@ -153,13 +186,9 @@ class TelegramClientManager:
     
     def stop_client_sync(self, account_id: int) -> bool:
         """Sync wrapper for stop_client"""
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(self.stop_client(account_id))
-        finally:
-            loop.close()
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(self.stop_client(account_id), loop)
+        return future.result()
 
     async def stop_client(self, account_id: int) -> bool:
         """
@@ -188,16 +217,15 @@ class TelegramClientManager:
             
             # Остановка клиента
             client = self._clients[account_id]
-            await client.stop()
             await client.disconnect()
             
             del self._clients[account_id]
             
             # Обновление статуса в БД
             try:
-                account = TelegramAccount.objects.get(id=account_id)
+                account = await sync_to_async(TelegramAccount.objects.get)(id=account_id)
                 account.status = TelegramAccount.AccountStatus.INACTIVE
-                account.save()
+                await sync_to_async(account.save)()
             except TelegramAccount.DoesNotExist:
                 pass
             
@@ -216,7 +244,7 @@ class TelegramClientManager:
         reply_to_message_id: Optional[int] = None
     ) -> Optional[int]:
         """
-        Отправить сообщение через Hydrogram клиент
+        Отправить сообщение через Telethon клиент
         
         Args:
             account_id: ID аккаунта
@@ -234,9 +262,9 @@ class TelegramClientManager:
         try:
             client = self._clients[account_id]
             sent_message = await client.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_to_message_id=reply_to_message_id
+                chat_id,
+                text,
+                reply_to=reply_to_message_id
             )
             
             # Обновление последней активности
@@ -249,52 +277,65 @@ class TelegramClientManager:
             
             return sent_message.id
             
-        except FloodWait as e:
-            logger.warning(f"FloodWait when sending message: {e.value} seconds")
+        except FloodWaitError as e:
+            logger.warning(f"FloodWait when sending message: {e.seconds} seconds")
             # Можно добавить retry с задержкой
-            await asyncio.sleep(e.value)
+            await asyncio.sleep(e.seconds)
             return await self.send_message(account_id, chat_id, text, reply_to_message_id)
         except Exception as e:
             logger.exception(f"Error sending message: {e}")
             return None
     
     def _create_message_handler(self, account: TelegramAccount):
-        """Создать обработчик сообщений для аккаунта"""
-        from hydrogram import filters
-        from hydrogram.handlers import MessageHandler
+        """Создать обработчик сообщений для аккаунта (Telethon)"""
         from channels.layers import get_channel_layer
         from asgiref.sync import async_to_sync
 
-        async def handle_message(client: Client, message):
+        async def handle_message(event):
             """Обработка входящих сообщений"""
             from ..models import Chat, Message as MessageModel
-            from ..tasks import process_incoming_message
             from channels.db import database_sync_to_async
 
+            message = event.message
+
             try:
+                # Получение чата и отправителя
+                chat_entity = await event.get_chat()
+                sender_entity = await event.get_sender()
+
+                # Определение типа чата
+                if message.is_private:
+                    chat_type = 'private'
+                elif message.is_group:
+                    chat_type = 'group'
+                elif message.is_channel:
+                    chat_type = 'channel'
+                else:
+                    chat_type = 'unknown'
+
                 # Получение или создание чата
                 @database_sync_to_async
                 def get_or_create_chat():
                     chat, created = Chat.objects.get_or_create(
-                        telegram_id=message.chat.id,
+                        telegram_id=message.chat_id,
                         telegram_account=account,
                         defaults={
-                            'chat_type': message.chat.type.name.lower(),
-                            'title': getattr(message.chat, 'title', None),
-                            'username': getattr(message.chat, 'username', None),
-                            'first_name': getattr(message.chat, 'first_name', None),
-                            'last_name': getattr(message.chat, 'last_name', None),
+                            'chat_type': chat_type,
+                            'title': getattr(chat_entity, 'title', None),
+                            'username': getattr(chat_entity, 'username', None),
+                            'first_name': getattr(chat_entity, 'first_name', None),
+                            'last_name': getattr(chat_entity, 'last_name', None),
                             'metadata': {},
                         }
                     )
 
                     # Обновление информации о чате
                     updated = False
-                    if hasattr(message.chat, 'title') and message.chat.title != chat.title:
-                        chat.title = message.chat.title
+                    if hasattr(chat_entity, 'title') and chat_entity.title != chat.title:
+                        chat.title = chat_entity.title
                         updated = True
-                    if hasattr(message.chat, 'username') and message.chat.username != chat.username:
-                        chat.username = message.chat.username
+                    if hasattr(chat_entity, 'username') and chat_entity.username != chat.username:
+                        chat.username = chat_entity.username
                         updated = True
 
                     if updated or created:
@@ -311,39 +352,49 @@ class TelegramClientManager:
                 # Создание записи сообщения в БД
                 @database_sync_to_async
                 def create_message_record():
+                    from django.db import IntegrityError
                     # Поиск сообщения на которое отвечают
                     reply_to_message = None
-                    if message.reply_to_message_id:
+                    if message.reply_to_msg_id:
                         try:
                             reply_to_message = MessageModel.objects.get(
-                                telegram_id=message.reply_to_message_id,
+                                telegram_id=message.reply_to_msg_id,
                                 chat=chat
                             )
                         except MessageModel.DoesNotExist:
                             pass
 
-                    # Создание сообщения
-                    message_obj = MessageModel.objects.create(
-                        telegram_id=message.id,
-                        chat=chat,
-                        text=message.text or message.caption or None,
-                        message_type=message_type,
-                        status=MessageModel.MessageStatus.RECEIVED,
-                        from_user_id=message.from_user.id if message.from_user else None,
-                        from_user_name=message.from_user.first_name if message.from_user else None,
-                        from_user_username=message.from_user.username if message.from_user else None,
-                        is_outgoing=message.outgoing,
-                        telegram_date=message.date,
-                        reply_to_message=reply_to_message,
-                        media_file_id=media_file_id,
-                        media_caption=message.caption,
-                        metadata={}
-                    )
+                    # Создание сообщения (дедупликация по telegram_id + chat)
+                    try:
+                        message_obj, _ = MessageModel.objects.get_or_create(
+                            telegram_id=message.id,
+                            chat=chat,
+                            defaults={
+                                'text': message.message or None,
+                                'message_type': message_type,
+                                'status': MessageModel.MessageStatus.RECEIVED,
+                                'from_user_id': getattr(sender_entity, 'id', None),
+                                'from_user_name': getattr(sender_entity, 'first_name', None),
+                                'from_user_username': getattr(sender_entity, 'username', None),
+                                'is_outgoing': message.out,
+                                'telegram_date': message.date,
+                                'reply_to_message': reply_to_message,
+                                'media_file_id': media_file_id,
+                                'media_caption': getattr(message, 'message', None) if message_type != 'text' else None,
+                                'metadata': {}
+                            }
+                        )
+                    except IntegrityError:
+                        # В случае гонки просто читаем существующее сообщение
+                        message_obj = MessageModel.objects.get(
+                            telegram_id=message.id,
+                            chat=chat
+                        )
 
                     # Обновление статистики чата
                     chat.message_count += 1
                     chat.last_message_at = message.date
-                    if not message.outgoing:
+                    if not message.out:
                         chat.unread_count += 1
                     chat.save(update_fields=['message_count', 'last_message_at', 'unread_count'])
 
@@ -352,12 +403,11 @@ class TelegramClientManager:
                 message_obj = await create_message_record()
 
                 # Обработка медиа если есть
-                if media_file_id and message_type in ['photo', 'video', 'voice', 'document']:
-                    # Скачивание медиа через Hydrogram
+                if message.media and message_type in ['photo', 'video', 'voice', 'document']:
                     try:
-                        await self._download_media_hydrogram(client, message, message_obj)
+                        await self._download_media_telethon(event.client, message, message_obj)
                     except Exception as e:
-                        logger.exception(f"Error downloading media via Hydrogram: {e}")
+                        logger.exception(f"Error downloading media via Telethon: {e}")
 
                 # Отправка real-time обновления через WebSocket
                 try:
@@ -424,41 +474,34 @@ class TelegramClientManager:
             except Exception as e:
                 logger.exception(f"Error handling message: {e}")
 
-        return MessageHandler(handle_message, filters.incoming & ~filters.outgoing)
+        return handle_message
     
     def _get_message_type(self, message) -> str:
-        """Определить тип сообщения"""
+        """Определить тип сообщения (Telethon)"""
         if message.photo:
             return 'photo'
-        elif message.video:
+        if message.video:
             return 'video'
-        elif message.voice:
+        if getattr(message, 'voice', None):
             return 'voice'
-        elif message.document:
+        if getattr(message, 'audio', None):
+            return 'audio'
+        if message.document:
             return 'document'
-        elif message.sticker:
+        if message.sticker:
             return 'sticker'
-        elif message.location:
+        if getattr(message, 'geo', None):
             return 'location'
-        elif message.contact:
+        if getattr(message, 'contact', None):
             return 'contact'
-        else:
-            return 'text'
+        return 'text'
     
     def _get_media_file_id(self, message) -> Optional[str]:
-        """Получить file_id медиа"""
-        if message.photo:
-            return message.photo.file_id
-        elif message.video:
-            return message.video.file_id
-        elif message.voice:
-            return message.voice.file_id
-        elif message.document:
-            return message.document.file_id
+        """Telethon не предоставляет file_id как в Bot API"""
         return None
 
-    async def _download_media_hydrogram(self, client: Client, message, message_obj):
-        """Скачать медиа через Hydrogram клиент"""
+    async def _download_media_telethon(self, client: TelegramClient, message, message_obj):
+        """Скачать медиа через Telethon клиент"""
         import os
         from django.conf import settings
         from ..models import Message as MessageModel
@@ -474,7 +517,7 @@ class TelegramClientManager:
             local_path = media_dir / file_name
 
             # Скачивание файла
-            await client.download_media(message, file_name=str(local_path))
+            await client.download_media(message, file=str(local_path))
 
             # Сохранение пути в БД
             relative_path = f"telegram/{message_obj.message_type}/{file_name}"
@@ -484,7 +527,7 @@ class TelegramClientManager:
             logger.info(f"Downloaded media for message {message_obj.id}: {local_path}")
 
         except Exception as e:
-            logger.exception(f"Error downloading media via Hydrogram: {e}")
+            logger.exception(f"Error downloading media via Telethon: {e}")
 
     def _get_file_extension(self, message, message_type: str) -> str:
         """Получить расширение файла"""
@@ -500,17 +543,34 @@ class TelegramClientManager:
                 return ext or '.bin'
             return '.bin'
         return '.bin'
+
+    def _get_sent_code_type(self, sent_code) -> tuple[str, Optional[str]]:
+        """Получить тип отправленного кода (Telethon)"""
+        def map_type(code_type):
+            name = code_type.__class__.__name__.lower()
+            if "sms" in name:
+                return "SMS"
+            if "app" in name:
+                return "APP"
+            if "flash" in name:
+                return "FLASH_CALL"
+            if "call" in name:
+                return "CALL"
+            return code_type.__class__.__name__
+
+        code_type = map_type(sent_code.type)
+        next_type = map_type(sent_code.next_type) if getattr(sent_code, 'next_type', None) else None
+        return code_type, next_type
     
-    async def _listen_updates(self, client: Client, account: TelegramAccount):
+    async def _listen_updates(self, client: TelegramClient, account: TelegramAccount):
         """Задача для прослушивания обновлений"""
         try:
-            await client.start()
             logger.info(f"Listening for updates on account {account.id}")
             # Клиент будет прослушивать обновления автоматически
             # Эта задача просто держит соединение активным
             while True:
                 await asyncio.sleep(60)  # Проверка каждую минуту
-                if not client.is_connected:
+                if not client.is_connected():
                     logger.warning(f"Client {account.id} disconnected, reconnecting...")
                     await client.connect()
         except asyncio.CancelledError:
@@ -548,136 +608,135 @@ class TelegramClientManager:
                 'error': 'Only personal accounts can be authenticated'
             }
 
+        # Validate phone number format
+        if not account.phone_number:
+            return {
+                'success': False,
+                'error': 'Phone number is required for authentication'
+            }
+
+        # Basic phone number validation (should start with + and have digits)
+        import re
+        phone_pattern = r'^\+\d{7,15}$'
+        if not re.match(phone_pattern, account.phone_number):
+            return {
+                'success': False,
+                'error': f'Invalid phone number format. Must be in international format starting with +, e.g. +79123456789. Current: {account.phone_number}'
+            }
+
+        # Validate API credentials
+        if not account.api_id or not account.api_hash:
+            return {
+                'success': False,
+                'error': 'API ID and API Hash are required for authentication'
+            }
+
         if account.id in self._clients:
             await self.stop_client(account.id)
 
+        logger.info(f"Starting authentication for account {account.id} with phone {account.phone_number}")
+
         try:
-            # Создание клиента для авторизации с proper async context management
-            client = Client(
-                name=f"auth_{account.id}",
-                api_id=account.api_id,
-                api_hash=account.api_hash,
-                session_string=None,  # Новая сессия
-                workdir=str(settings.BASE_DIR / 'sessions'),
-            )
+            # Создание клиента Telethon (временная сессия)
+            client = TelegramClient(StringSession(), account.api_id, account.api_hash)
 
             # Запуск процесса авторизации
             account.status = TelegramAccount.AccountStatus.AUTHENTICATING
             account.last_error = None
             await sync_to_async(account.save)()
 
-            # Попытка авторизации - manual connection to avoid interactive prompts
             await client.connect()
 
             try:
-                if not client.me:
-                    try:
-                        # Отправка кода на номер телефона
-                        sent_code = await client.send_code(account.phone_number)
+                if not await client.is_user_authorized():
+                    # Отправка кода на номер телефона
+                    sent_code = await client.send_code_request(account.phone_number)
 
-                        # Сохраняем phone_code_hash для верификации
-                        import time
-                        account.session_string = f"phone_code_hash:{sent_code.phone_code_hash}:{int(time.time())}"
-                        await sync_to_async(account.save)()
+                    code_type, next_type = self._get_sent_code_type(sent_code)
 
-                        # Определяем тип отправленного кода
-                        code_type = sent_code.type.name if hasattr(sent_code.type, 'name') else str(sent_code.type)
-
-                        # Формируем сообщение в зависимости от типа кода
-                        if code_type == 'SMS':
-                            message = 'OTP код отправлен по SMS на ваш номер телефона'
-                            if sent_code.next_type:
-                                next_type_name = sent_code.next_type.name if hasattr(sent_code.next_type, 'name') else str(sent_code.next_type)
-                                message += f'. Если SMS не пришел, следующий метод: {next_type_name}'
-                        elif code_type == 'APP':
-                            message = 'OTP код отправлен в Telegram приложение'
-                        elif code_type == 'CALL':
-                            message = 'Вам поступит звонок с кодом'
-                        elif code_type == 'FLASH_CALL':
-                            message = 'Вам поступит пропущенный звонок (код в номере)'
-                        else:
-                            message = f'OTP код отправлен через {code_type}'
-
-                        return {
-                            'success': True,
-                            'status': 'otp_required',
-                            'message': message,
-                            'phone_code_hash': sent_code.phone_code_hash,
-                            'code_type': code_type,
-                            'next_type': sent_code.next_type.name if sent_code.next_type and hasattr(sent_code.next_type, 'name') else None,
-                            'timeout': sent_code.timeout
-                        }
-
-                    except Exception as e:
-                        logger.exception(f"Error sending code: {e}")
-
-                        # Handle FloodWait errors specifically
-                        error_message = str(e)
-                        if "FLOOD_WAIT" in error_message:
-                            # Extract wait time from error message
-                            import re
-                            wait_match = re.search(r'wait of (\d+) seconds', error_message)
-                            if wait_match:
-                                wait_seconds = int(wait_match.group(1))
-                                wait_hours = wait_seconds // 3600
-                                wait_minutes = (wait_seconds % 3600) // 60
-
-                                if wait_hours > 0:
-                                    readable_wait = f"{wait_hours} часов {wait_minutes} минут"
-                                else:
-                                    readable_wait = f"{wait_minutes} минут"
-
-                                user_message = f"Превышен лимит запросов Telegram. Подождите {readable_wait} перед следующей попыткой."
-                            else:
-                                user_message = "Превышен лимит запросов Telegram. Попробуйте позже."
-                        else:
-                            user_message = f"Ошибка отправки кода: {error_message}"
-
-                        account.status = TelegramAccount.AccountStatus.ERROR
-                        account.last_error = user_message
-                        await sync_to_async(account.save)()
-                        await client.disconnect()
-                        return {
-                            'success': False,
-                            'error': user_message
-                        }
-                else:
-                    # Уже авторизован
-                    session_string = await client.export_session_string()
-                    account.session_string = session_string
-                    account.status = TelegramAccount.AccountStatus.ACTIVE
-
-                    # Получение информации о пользователе
-                    me = await client.get_me()
-                    account.telegram_user_id = me.id
-                    account.first_name = me.first_name
-                    account.last_name = me.last_name
-                    account.username = me.username
+                    # Сохраняем временную сессию и phone_code_hash для верификации
+                    account.pending_session_string = client.session.save()
+                    account.pending_session_name = None
+                    account.pending_phone_code_hash = sent_code.phone_code_hash
+                    account.pending_code_sent_at = timezone.now()
+                    account.pending_code_type = code_type
                     await sync_to_async(account.save)()
 
-                    await client.disconnect()
+                    # Формируем сообщение в зависимости от типа кода
+                    if code_type == 'SMS':
+                        message = 'OTP код отправлен по SMS на ваш номер телефона'
+                        if next_type:
+                            message += f'. Если SMS не пришел, следующий метод: {next_type}'
+                    elif code_type == 'APP':
+                        message = 'OTP код отправлен в Telegram приложение'
+                    elif code_type == 'CALL':
+                        message = 'Вам поступит звонок с кодом'
+                    elif code_type == 'FLASH_CALL':
+                        message = 'Вам поступит пропущенный звонок (код в номере)'
+                    else:
+                        message = f'OTP код отправлен через {code_type}'
+
                     return {
                         'success': True,
-                        'status': 'authenticated',
-                        'message': 'Account already authenticated'
+                        'status': 'otp_required',
+                        'message': message,
+                        'phone_code_hash': sent_code.phone_code_hash,
+                        'code_type': code_type,
+                        'next_type': next_type,
+                        'timeout': getattr(sent_code, 'timeout', None)
                     }
 
+                # Уже авторизован
+                session_string = client.session.save()
+                account.session_string = session_string
+                account.status = TelegramAccount.AccountStatus.ACTIVE
+
+                # Получение информации о пользователе
+                me = await client.get_me()
+                account.telegram_user_id = me.id
+                account.first_name = me.first_name
+                account.last_name = me.last_name
+                account.username = me.username
+                await sync_to_async(account.save)()
+
+                return {
+                    'success': True,
+                    'status': 'authenticated',
+                    'message': 'Account already authenticated'
+                }
+
+            except FloodWaitError as e:
+                wait_seconds = e.seconds
+                wait_hours = wait_seconds // 3600
+                wait_minutes = (wait_seconds % 3600) // 60
+                if wait_hours > 0:
+                    readable_wait = f"{wait_hours} часов {wait_minutes} минут"
+                else:
+                    readable_wait = f"{wait_minutes} минут"
+                user_message = f"Превышен лимит запросов Telegram. Подождите {readable_wait} перед следующей попыткой."
+                account.status = TelegramAccount.AccountStatus.ERROR
+                account.last_error = user_message
+                await sync_to_async(account.save)()
+                return {'success': False, 'error': user_message}
+            except PhoneNumberInvalidError:
+                user_message = "Неверный номер телефона. Проверьте формат номера (должен начинаться с + и содержать только цифры)."
+            except PhoneNumberBannedError:
+                user_message = "Этот номер телефона заблокирован в Telegram."
+            except PhoneNumberUnoccupiedError:
+                user_message = "Этот номер телефона не зарегистрирован в Telegram."
+            except ApiIdInvalidError:
+                user_message = "Неверный API ID. Проверьте настройки API."
             except Exception as e:
                 logger.exception(f"Error in authenticate_account: {e}")
-                await client.disconnect()
-                account.status = TelegramAccount.AccountStatus.ERROR
-                account.last_error = str(e)
-                await sync_to_async(account.save)()
-                return {
-                    'success': False,
-                    'error': f"Authentication failed: {str(e)}"
-                }
-            finally:
-                try:
-                    await client.disconnect()
-                except:
-                    pass  # Already disconnected or connection error
+                user_message = f"Ошибка отправки кода: {str(e)}"
 
+            account.status = TelegramAccount.AccountStatus.ERROR
+            account.last_error = user_message
+            await sync_to_async(account.save)()
+            return {
+                'success': False,
+                'error': user_message
+            }
         except Exception as e:
             logger.exception(f"Error in authentication: {e}")
             account.status = TelegramAccount.AccountStatus.ERROR
@@ -687,6 +746,11 @@ class TelegramClientManager:
                 'success': False,
                 'error': str(e)
             }
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass  # Already disconnected or connection error
 
     def verify_otp_sync(self, account: TelegramAccount, otp_code: str, password: str = None) -> dict:
         """Sync wrapper for verify_otp"""
@@ -716,121 +780,68 @@ class TelegramClientManager:
                 'error': 'Only personal accounts can be verified'
             }
 
-        # Извлечение phone_code_hash из session_string
-        if not account.session_string or not account.session_string.startswith('phone_code_hash:'):
+        # Извлечение phone_code_hash из pending-полей
+        if not account.pending_phone_code_hash or not account.pending_session_string:
             return {
                 'success': False,
                 'error': 'Аутентификация не запущена. Сначала нажмите "Начать аутентификацию".'
             }
 
-        # Парсим phone_code_hash и timestamp
-        parts = account.session_string.split(':')
-        if len(parts) != 3:
-            return {
-                'success': False,
-                'error': 'Некорректные данные аутентификации. Запустите аутентификацию заново.'
-            }
-
-        phone_code_hash = parts[1]
-        timestamp = int(parts[2])
-        import time
-        current_time = int(time.time())
-
-        # Проверяем не истек ли хеш (более 5 минут)
-        if current_time - timestamp > 300:  # 5 minutes
-            logger.warning(f"Phone code hash expired for account {account.id}, restarting authentication")
-            try:
-                # Автоматически перезапускаем аутентификацию
-                restart_result = await self.authenticate_account(account)
-                if restart_result['success'] and restart_result.get('status') == 'otp_required':
-                    return {
-                        'success': False,
-                        'error': f'Код истек. Автоматически запущена новая аутентификация. Проверьте Telegram для нового кода ({restart_result.get("code_type", "SMS")}).'
-                    }
-                else:
-                    return {
-                        'success': False,
-                        'error': f'Код истек. Не удалось автоматически перезапустить аутентификацию: {restart_result.get("error", "Неизвестная ошибка")}'
-                    }
-            except Exception as restart_error:
-                logger.exception(f"Error restarting authentication for account {account.id}: {restart_error}")
-                return {
-                    'success': False,
-                    'error': 'Код подтверждения истек. Запустите аутентификацию заново вручную.'
-                }
+        phone_code_hash = account.pending_phone_code_hash
 
         try:
-            # Создание клиента для верификации с proper async context management
+            # Создание клиента для верификации (Telethon)
             logger.info(f"Creating verification client for account {account.id}")
-            client = Client(
-                name=f"auth_{account.id}",
-                api_id=account.api_id,
-                api_hash=account.api_hash,
-                session_string=None,
-                workdir=str(settings.BASE_DIR / 'sessions'),
+            client = TelegramClient(
+                StringSession(account.pending_session_string),
+                account.api_id,
+                account.api_hash
             )
 
-            # Manual connection to avoid interactive prompts
             await client.connect()
 
             try:
                 logger.info(f"Client connected successfully for account {account.id} verification")
-                # Верификация с сохраненным phone_code_hash
                 logger.info(f"Attempting sign-in with stored hash for account {account.id}")
                 await client.sign_in(
-                    phone_number=account.phone_number,
-                    phone_code_hash=phone_code_hash,
-                    phone_code=otp_code
+                    phone=account.phone_number,
+                    code=otp_code,
+                    phone_code_hash=phone_code_hash
                 )
                 logger.info(f"Sign-in successful for account {account.id}")
+            except SessionPasswordNeededError:
+                if not password:
+                    return {
+                        'success': False,
+                        'error': 'Требуется пароль 2FA. Введите пароль и попробуйте снова.'
+                    }
+                await client.sign_in(password=password)
+            except PhoneCodeInvalidError:
+                error_message = "Неверный код подтверждения. Проверьте код и попробуйте снова."
+                account.status = TelegramAccount.AccountStatus.ERROR
+                account.last_error = f"OTP verification failed: {error_message}"
+                await sync_to_async(account.save)()
+                return {'success': False, 'error': error_message}
+            except PhoneCodeExpiredError:
+                error_message = (
+                    "Код подтверждения истек или был заменен новым. "
+                    "Нажмите «Отправить код повторно» и используйте последний код."
+                )
+                account.status = TelegramAccount.AccountStatus.ERROR
+                account.last_error = f"OTP verification failed: {error_message}"
+                await sync_to_async(account.save)()
+                return {'success': False, 'error': error_message}
             except Exception as sign_in_error:
-                    # Handle 2FA password requirement
-                    if "password" in str(sign_in_error).lower() and password:
-                        try:
-                            await client.check_password(password)
-                        except Exception as pwd_error:
-                            account.status = TelegramAccount.AccountStatus.ERROR
-                            account.last_error = f"Invalid 2FA password: {str(pwd_error)}"
-                            await sync_to_async(account.save)()
-                            return {
-                                'success': False,
-                                'error': f"2FA password error: {str(pwd_error)}"
-                            }
-                    else:
-                        # Handle other sign-in errors
-                        error_message = str(sign_in_error)
-                        if "EOF when reading a line" in error_message:
-                            error_message = "Ошибка сети при подключении к Telegram. Проверьте интернет-соединение и попробуйте еще раз."
-                        elif "PHONE_CODE_INVALID" in error_message:
-                            error_message = "Неверный код подтверждения. Проверьте код и попробуйте снова."
-                        elif "PHONE_CODE_EMPTY" in error_message:
-                            error_message = "Код подтверждения не указан."
-                        elif "PHONE_CODE_EXPIRED" in error_message:
-                            # Если хеш истек при попытке входа, перезапускаем аутентификацию
-                            logger.warning(f"Phone code hash expired during sign-in for account {account.id}, restarting authentication")
-                            try:
-                                restart_result = await self.authenticate_account(account)
-                                if restart_result['success'] and restart_result.get('status') == 'otp_required':
-                                    error_message = f'Код истек. Автоматически запущена новая аутентификация. Проверьте Telegram для нового кода ({restart_result.get("code_type", "SMS")}).'
-                                else:
-                                    error_message = f'Код истек. Не удалось автоматически перезапустить аутентификацию.'
-                            except Exception as restart_error:
-                                logger.exception(f"Error restarting authentication for account {account.id}: {restart_error}")
-                                error_message = "Код подтверждения истек. Запустите аутентификацию заново."
-                        elif "connection" in error_message.lower() or "network" in error_message.lower():
-                            error_message = "Проблема с подключением к Telegram. Проверьте интернет-соединение."
-
-                        account.status = TelegramAccount.AccountStatus.ERROR
-                        account.last_error = f"OTP verification failed: {error_message}"
-                        await sync_to_async(account.save)()
-                        await client.disconnect()
-                        return {
-                            'success': False,
-                            'error': error_message
-                        }
+                error_message = str(sign_in_error)
+                if "connection" in error_message.lower() or "network" in error_message.lower():
+                    error_message = "Проблема с подключением к Telegram. Проверьте интернет-соединение."
+                account.status = TelegramAccount.AccountStatus.ERROR
+                account.last_error = f"OTP verification failed: {error_message}"
+                await sync_to_async(account.save)()
+                return {'success': False, 'error': error_message}
 
             # Успешная авторизация
-            session_string = await client.export_session_string()
+            session_string = client.session.save()
 
             # Получение информации о пользователе
             me = await client.get_me()
@@ -839,6 +850,11 @@ class TelegramClientManager:
             account.last_name = me.last_name
             account.username = me.username
             account.session_string = session_string
+            account.pending_session_string = None
+            account.pending_session_name = None
+            account.pending_phone_code_hash = None
+            account.pending_code_sent_at = None
+            account.pending_code_type = None
             account.status = TelegramAccount.AccountStatus.ACTIVE
             account.last_error = None
             account.error_count = 0
@@ -857,7 +873,7 @@ class TelegramClientManager:
             logger.exception(f"Error in OTP verification: {e}")
             try:
                 await client.disconnect()
-            except:
+            except Exception:
                 pass
             account.status = TelegramAccount.AccountStatus.ERROR
             account.last_error = str(e)
@@ -876,29 +892,25 @@ class TelegramClientManager:
             }
 
         try:
-            # Create client for sending verification code
-            client = Client(
-                name=f"verify_{account.id}",
-                api_id=account.api_id,
-                api_hash=account.api_hash,
-                session_string=None,
-                workdir=str(settings.BASE_DIR / 'sessions'),
-            )
+            # Create client for sending verification code (Telethon)
+            session = StringSession(account.pending_session_string) if account.pending_session_string else StringSession()
+            client = TelegramClient(session, account.api_id, account.api_hash)
 
-            # Manual connection to avoid interactive prompts
             await client.connect()
 
             try:
                 # Send new code
-                sent_code = await client.send_code(account.phone_number)
+                sent_code = await client.send_code_request(account.phone_number)
 
-                # Update session string with new hash and timestamp
-                import time
-                account.session_string = f"phone_code_hash:{sent_code.phone_code_hash}:{int(time.time())}"
+                code_type, _ = self._get_sent_code_type(sent_code)
+
+                # Update pending auth data with new hash and timestamp
+                account.pending_session_string = client.session.save()
+                account.pending_session_name = None
+                account.pending_phone_code_hash = sent_code.phone_code_hash
+                account.pending_code_sent_at = timezone.now()
+                account.pending_code_type = code_type
                 await sync_to_async(account.save)()
-
-                # Determine code type
-                code_type = sent_code.type.name if hasattr(sent_code.type, 'name') else str(sent_code.type)
 
                 await client.disconnect()
                 return {
@@ -907,49 +919,34 @@ class TelegramClientManager:
                     'code_type': code_type
                 }
 
-            except Exception as e:
-                await client.disconnect()
-                raise e
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
+        except FloodWaitError as e:
+            wait_seconds = e.seconds
+            wait_hours = wait_seconds // 3600
+            wait_minutes = (wait_seconds % 3600) // 60
+            if wait_hours > 0:
+                readable_wait = f"{wait_hours} часов {wait_minutes} минут"
+            else:
+                readable_wait = f"{wait_minutes} минут"
+            user_message = f"Превышен лимит запросов Telegram. Подождите {readable_wait} перед следующей попыткой."
+            return {'success': False, 'error': user_message}
         except Exception as e:
             logger.exception(f"Error sending verification code: {e}")
-
-            # Handle FloodWait errors specifically
-            error_message = str(e)
-            if "FLOOD_WAIT" in error_message:
-                # Extract wait time from error message
-                import re
-                wait_match = re.search(r'wait of (\d+) seconds', error_message)
-                if wait_match:
-                    wait_seconds = int(wait_match.group(1))
-                    wait_hours = wait_seconds // 3600
-                    wait_minutes = (wait_seconds % 3600) // 60
-
-                    if wait_hours > 0:
-                        readable_wait = f"{wait_hours} часов {wait_minutes} минут"
-                    else:
-                        readable_wait = f"{wait_minutes} минут"
-
-                    user_message = f"Превышен лимит запросов Telegram. Подождите {readable_wait} перед следующей попыткой."
-                else:
-                    user_message = "Превышен лимит запросов Telegram. Попробуйте позже."
-            else:
-                user_message = f"Не удалось отправить код верификации: {error_message}"
-
             return {
                 'success': False,
-                'error': user_message
+                'error': f"Не удалось отправить код верификации: {str(e)}"
             }
 
     def send_verification_code_sync(self, account: TelegramAccount) -> dict:
         """Sync wrapper for send_verification_code"""
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(self.send_verification_code(account))
-        finally:
-            loop.close()
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(self.send_verification_code(account), loop)
+        return future.result()
 
     async def resend_code(self, account: TelegramAccount) -> dict:
         """
@@ -968,39 +965,42 @@ class TelegramClientManager:
             }
 
         # Check if authentication is in progress
-        if not account.session_string or not account.session_string.startswith('phone_code_hash:'):
+        if not account.pending_phone_code_hash:
             return {
                 'success': False,
                 'error': 'No pending authentication found'
             }
 
-        # Parse current phone_code_hash
-        parts = account.session_string.split(':')
-        current_hash = parts[1] if len(parts) >= 2 else None
+        current_hash = account.pending_phone_code_hash
 
         try:
-            # Create client for resending
-            client = Client(
-                name=f"resend_{account.id}",
-                api_id=account.api_id,
-                api_hash=account.api_hash,
-                session_string=None,
-                workdir=str(settings.BASE_DIR / 'sessions'),
-            )
+            session = StringSession(account.pending_session_string) if account.pending_session_string else StringSession()
+            client = TelegramClient(session, account.api_id, account.api_hash)
 
             await client.connect()
 
             try:
-                # Send new code (fresh phone_code_hash will be generated)
-                sent_code = await client.send_code(account.phone_number)
+                # Prefer resend_code_request to switch delivery method if possible
+                if account.pending_phone_code_hash:
+                    try:
+                        sent_code = await client.resend_code_request(
+                            account.phone_number,
+                            account.pending_phone_code_hash
+                        )
+                    except Exception:
+                        sent_code = await client.send_code_request(account.phone_number)
+                else:
+                    sent_code = await client.send_code_request(account.phone_number)
 
-                # Update session string with new hash and timestamp
-                import time
-                account.session_string = f"phone_code_hash:{sent_code.phone_code_hash}:{int(time.time())}"
+                code_type, next_type = self._get_sent_code_type(sent_code)
+
+                # Update pending auth data with new hash and timestamp
+                account.pending_session_string = client.session.save()
+                account.pending_session_name = None
+                account.pending_phone_code_hash = sent_code.phone_code_hash
+                account.pending_code_sent_at = timezone.now()
+                account.pending_code_type = code_type
                 await sync_to_async(account.save)()
-
-                # Determine code type
-                code_type = sent_code.type.name if hasattr(sent_code.type, 'name') else str(sent_code.type)
 
                 # Form message based on code type
                 if code_type == 'SMS':
@@ -1014,31 +1014,29 @@ class TelegramClientManager:
                 else:
                     message = f'OTP код отправлен через {code_type}'
 
-                await client.disconnect()
                 return {
                     'success': True,
                     'status': 'otp_resent',
                     'message': message,
                     'phone_code_hash': sent_code.phone_code_hash,
                     'code_type': code_type,
-                    'next_type': sent_code.next_type.name if sent_code.next_type and hasattr(sent_code.next_type, 'name') else None,
-                    'timeout': sent_code.timeout
+                    'next_type': next_type,
+                    'timeout': getattr(sent_code, 'timeout', None)
                 }
 
-            except Exception as e:
-                logger.exception(f"Error resending code: {e}")
-                await client.disconnect()
-                return {
-                    'success': False,
-                    'error': f"Failed to resend code: {str(e)}"
-                }
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
+        except FloodWaitError as e:
+            return {
+                'success': False,
+                'error': f"Превышен лимит запросов Telegram. Подождите {e.seconds} секунд."
+            }
         except Exception as e:
             logger.exception(f"Error in resend_code: {e}")
-            try:
-                await client.disconnect()
-            except:
-                pass
             return {
                 'success': False,
                 'error': str(e)
@@ -1046,23 +1044,15 @@ class TelegramClientManager:
 
     def resend_code_sync(self, account: TelegramAccount) -> dict:
         """Sync wrapper for resend_code"""
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(self.resend_code(account))
-        finally:
-            loop.close()
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(self.resend_code(account), loop)
+        return future.result()
 
     def restart_client_sync(self, account_id: int) -> bool:
         """Sync wrapper for restart_client"""
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(self.restart_client(account_id))
-        finally:
-            loop.close()
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(self.restart_client(account_id), loop)
+        return future.result()
 
     async def restart_client(self, account_id: int) -> bool:
         """Перезапустить клиент"""
@@ -1077,18 +1067,179 @@ class TelegramClientManager:
         """Получить список ID запущенных аккаунтов"""
         return list(self._clients.keys())
 
+    async def create_qr_login(self, account: TelegramAccount) -> dict:
+        """Создать QR login для Telethon (async wrapper)"""
+        return self.create_qr_login_sync(account)
+
+    async def check_qr_login(self, account: TelegramAccount, password: str | None = None) -> dict:
+        """Проверить статус QR login (async wrapper)"""
+        return self.check_qr_login_sync(account, password)
+
+    async def _cleanup_qr_login(self, account_id: int) -> None:
+        entry = self._qr_logins.pop(account_id, None)
+        if entry:
+            try:
+                if entry.get('thread') and entry['thread'].is_alive():
+                    entry['cancel'] = True
+            except Exception:
+                pass
+
+    def create_qr_login_sync(self, account: TelegramAccount) -> dict:
+        """Sync creation of QR login using a dedicated background thread"""
+        if account.account_type != TelegramAccount.AccountType.PERSONAL:
+            return {'success': False, 'error': 'Only personal accounts can be authenticated'}
+
+        # Stop previous QR login flow if any
+        entry = self._qr_logins.get(account.id)
+        if entry:
+            entry['cancel'] = True
+
+        entry = {
+            'status': 'pending',
+            'qr_url': None,
+            'error': None,
+            'session_string': None,
+            'password': None,
+            'password_event': threading.Event(),
+            'qr_ready_event': threading.Event(),
+            'cancel': False,
+        }
+        self._qr_logins[account.id] = entry
+
+        def runner():
+            async def run_qr():
+                client = TelegramClient(StringSession(), account.api_id, account.api_hash)
+                await client.connect()
+                try:
+                    qr_login = await client.qr_login()
+                    entry['qr_url'] = qr_login.url
+                    entry['status'] = 'pending'
+                    entry['qr_ready_event'].set()
+
+                    try:
+                        await qr_login.wait()
+                    except SessionPasswordNeededError:
+                        entry['status'] = 'password_required'
+                        # Wait for password from UI
+                        entry['password_event'].wait(timeout=300)
+                        if entry.get('cancel'):
+                            return
+                        if not entry.get('password'):
+                            entry['status'] = 'error'
+                            entry['error'] = '2FA пароль не был введен вовремя.'
+                            return
+                        await client.sign_in(password=entry['password'])
+
+                    if entry.get('cancel'):
+                        return
+
+                    if await client.is_user_authorized():
+                        session_string = client.session.save()
+                        entry['session_string'] = session_string
+                        entry['status'] = 'authenticated'
+
+                        # Persist immediately so admin reflects status without extra check
+                        me = await client.get_me()
+                        account.telegram_user_id = me.id
+                        account.first_name = me.first_name
+                        account.last_name = me.last_name
+                        account.username = me.username
+                        account.session_string = session_string
+                        account.pending_session_string = None
+                        account.pending_session_name = None
+                        account.pending_phone_code_hash = None
+                        account.pending_code_sent_at = None
+                        account.pending_code_type = None
+                        account.status = TelegramAccount.AccountStatus.ACTIVE
+                        account.last_error = None
+                        account.error_count = 0
+                        await sync_to_async(account.save)()
+                    else:
+                        entry['status'] = 'pending'
+                except Exception as e:
+                    entry['status'] = 'error'
+                    entry['error'] = str(e)
+                    logger.exception(f"Error creating QR login: {e}")
+                finally:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(run_qr())
+            loop.close()
+
+        thread = threading.Thread(target=runner, daemon=True)
+        entry['thread'] = thread
+        thread.start()
+
+        account.status = TelegramAccount.AccountStatus.AUTHENTICATING
+        account.last_error = None
+        account.save(update_fields=['status', 'last_error'])
+
+        # Wait briefly for QR URL to be ready
+        entry['qr_ready_event'].wait(timeout=2)
+
+        return {
+            'success': True,
+            'status': 'qr_required',
+            'qr_url': entry.get('qr_url'),
+        }
+
+    def check_qr_login_sync(self, account: TelegramAccount, password: str | None = None) -> dict:
+        """Sync status check for QR login"""
+        entry = self._qr_logins.get(account.id)
+        if not entry:
+            # If account already activated, return authenticated
+            if account.status == TelegramAccount.AccountStatus.ACTIVE:
+                return {'success': True, 'status': 'authenticated'}
+            return {'success': False, 'error': 'QR login not initialized'}
+
+        if entry.get('status') == 'password_required' and password:
+            entry['password'] = password
+            entry['password_event'].set()
+            return {'success': True, 'status': 'pending', 'qr_url': entry.get('qr_url')}
+
+        if entry.get('status') == 'authenticated' and entry.get('session_string'):
+            session_string = entry['session_string']
+            # Финализируем сохранение
+            account.session_string = session_string
+            account.pending_session_string = None
+            account.pending_session_name = None
+            account.pending_phone_code_hash = None
+            account.pending_code_sent_at = None
+            account.pending_code_type = None
+            account.status = TelegramAccount.AccountStatus.ACTIVE
+            account.last_error = None
+            account.error_count = 0
+            account.save()
+            self._qr_logins.pop(account.id, None)
+            return {'success': True, 'status': 'authenticated'}
+
+        if entry.get('status') == 'error':
+            error = entry.get('error', 'Unknown error')
+            self._qr_logins.pop(account.id, None)
+            return {'success': False, 'error': error}
+
+        return {'success': True, 'status': entry.get('status', 'pending'), 'qr_url': entry.get('qr_url')}
+
     async def start_all_active(self):
         """Запустить все активные аккаунты"""
-        accounts = TelegramAccount.objects.filter(
-            account_type=TelegramAccount.AccountType.PERSONAL,
-            status__in=[
-                TelegramAccount.AccountStatus.ACTIVE,
-                TelegramAccount.AccountStatus.INACTIVE
-            ]
-        )
+        @sync_to_async
+        def get_accounts():
+            return list(TelegramAccount.objects.filter(
+                account_type=TelegramAccount.AccountType.PERSONAL,
+                status__in=[
+                    TelegramAccount.AccountStatus.ACTIVE,
+                    TelegramAccount.AccountStatus.INACTIVE
+                ]
+            ))
 
+        accounts = await get_accounts()
         for account in accounts:
-            await self.start_client(account)
+            self.start_client_sync(account)
 
     async def stop_all(self):
         """Остановить все клиенты"""

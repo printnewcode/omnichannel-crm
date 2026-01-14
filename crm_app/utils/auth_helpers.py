@@ -1,22 +1,26 @@
 """
-Утилиты для авторизации Hydrogram аккаунтов
+Утилиты для авторизации Telethon аккаунтов
 """
 import asyncio
 import logging
 from typing import Optional, Tuple
-from hydrogram import Client
-from hydrogram.session import StringSession
-from hydrogram.errors import (
-    FloodWait, AuthKeyUnregistered, UserDeactivated,
-    PhoneCodeInvalid, PhoneCodeExpired, SessionPasswordNeeded
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.errors import (
+    FloodWaitError,
+    AuthKeyUnregisteredError,
+    UserDeactivatedError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
+    SessionPasswordNeededError,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class HydrogramAuthHelper:
+class TelethonAuthHelper:
     """
-    Помощник для авторизации Hydrogram аккаунтов
+    Помощник для авторизации Telethon аккаунтов
     Обрабатывает процесс получения OTP и создания сессии
     """
     
@@ -40,17 +44,12 @@ class HydrogramAuthHelper:
         """
         try:
             # Создание временного клиента
-            client = Client(
-                name="temp_auth",
-                api_id=api_id,
-                api_hash=api_hash,
-                workdir="/tmp/hydrogram_sessions"
-            )
+            client = TelegramClient(StringSession(), api_id, api_hash)
             
             await client.connect()
             
             # Отправка кода
-            sent_code = await client.send_code(phone_number)
+            sent_code = await client.send_code_request(phone_number)
             phone_code_hash = sent_code.phone_code_hash
             
             await client.disconnect()
@@ -58,8 +57,8 @@ class HydrogramAuthHelper:
             logger.info(f"Code sent to {phone_number}")
             return True, phone_code_hash, None
             
-        except FloodWait as e:
-            error_msg = f"FloodWait: {e.value} seconds"
+        except FloodWaitError as e:
+            error_msg = f"FloodWait: {e.seconds} seconds"
             logger.warning(error_msg)
             return False, None, error_msg
         except Exception as e:
@@ -74,7 +73,8 @@ class HydrogramAuthHelper:
         phone_number: str,
         phone_code_hash: str,
         otp_code: str,
-        password: Optional[str] = None
+        password: Optional[str] = None,
+        session_string: Optional[str] = None
     ) -> Tuple[bool, Optional[str], Optional[str]]:
         """
         Подтвердить код и получить session string
@@ -93,49 +93,47 @@ class HydrogramAuthHelper:
         """
         try:
             # Создание временного клиента
-            client = Client(
-                name="temp_auth",
-                api_id=api_id,
-                api_hash=api_hash,
-                workdir="/tmp/hydrogram_sessions"
-            )
+            if not session_string:
+                return False, None, "Session string is required for OTP verification"
+
+            client = TelegramClient(StringSession(session_string), api_id, api_hash)
             
             await client.connect()
             
             try:
                 # Подтверждение кода
                 signed_in = await client.sign_in(
-                    phone_number=phone_number,
-                    phone_code_hash=phone_code_hash,
-                    phone_code=otp_code
+                    phone=phone_number,
+                    code=otp_code,
+                    phone_code_hash=phone_code_hash
                 )
-            except SessionPasswordNeeded:
+            except SessionPasswordNeededError:
                 # Требуется пароль для 2FA
                 if not password:
                     await client.disconnect()
                     return False, None, "Password required for 2FA"
                 
                 # Проверка пароля
-                signed_in = await client.check_password(password)
+                signed_in = await client.sign_in(password=password)
             
             # Получение session string
-            session_string = await client.export_session_string()
+            session_string = client.session.save()
             
             await client.disconnect()
             
             logger.info(f"Successfully authenticated {phone_number}")
             return True, session_string, None
             
-        except PhoneCodeInvalid:
+        except PhoneCodeInvalidError:
             error_msg = "Invalid OTP code"
             logger.warning(error_msg)
             return False, None, error_msg
-        except PhoneCodeExpired:
+        except PhoneCodeExpiredError:
             error_msg = "OTP code expired"
             logger.warning(error_msg)
             return False, None, error_msg
-        except FloodWait as e:
-            error_msg = f"FloodWait: {e.value} seconds"
+        except FloodWaitError as e:
+            error_msg = f"FloodWait: {e.seconds} seconds"
             logger.warning(error_msg)
             return False, None, error_msg
         except Exception as e:
@@ -162,17 +160,10 @@ class HydrogramAuthHelper:
                 (success, account_info, error_message)
         """
         try:
-            client = Client(
-                name="temp_check",
-                api_id=api_id,
-                api_hash=api_hash,
-                session_string=session_string,
-                workdir="/tmp/hydrogram_sessions"
-            )
-            
-            await client.start()
+            client = TelegramClient(StringSession(session_string), api_id, api_hash)
+            await client.connect()
             me = await client.get_me()
-            await client.stop()
+            await client.disconnect()
             
             account_info = {
                 'id': me.id,
@@ -184,7 +175,7 @@ class HydrogramAuthHelper:
             
             return True, account_info, None
             
-        except AuthKeyUnregistered:
+        except AuthKeyUnregisteredError:
             error_msg = "Session expired or invalid"
             logger.warning(error_msg)
             return False, None, error_msg
@@ -192,3 +183,7 @@ class HydrogramAuthHelper:
             error_msg = f"Error getting account info: {str(e)}"
             logger.exception(error_msg)
             return False, None, error_msg
+
+
+# Backwards compatibility alias
+HydrogramAuthHelper = TelethonAuthHelper

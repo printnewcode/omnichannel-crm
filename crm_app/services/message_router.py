@@ -1,6 +1,6 @@
 """
 Сервис для маршрутизации ответов на сообщения
-Автоматически определяет, через какой клиент отправлять ответ (Hydrogram или telebot)
+Автоматически определяет, через какой клиент отправлять ответ (Telethon или telebot)
 """
 import logging
 import asyncio
@@ -44,8 +44,8 @@ class MessageRouter:
             
             # Определение способа отправки
             if account.account_type == TelegramAccount.AccountType.PERSONAL:
-                # Отправка через Hydrogram
-                return await self._send_via_hydrogram(
+                # Отправка через Telethon
+                return await self._send_via_telethon(
                     account=account,
                     chat_id=chat.telegram_id,
                     text=text,
@@ -98,7 +98,7 @@ class MessageRouter:
             logger.exception(f"Error in send_reply sync wrapper: {e}")
             return None
     
-    async def _send_via_hydrogram(
+    async def _send_via_telethon(
         self,
         account: TelegramAccount,
         chat_id: int,
@@ -107,7 +107,7 @@ class MessageRouter:
         media_path: Optional[str] = None
     ) -> Optional[int]:
         """
-        Отправка через Hydrogram клиент
+        Отправка через Telethon клиент
 
         Args:
             account: TelegramAccount модель
@@ -119,7 +119,7 @@ class MessageRouter:
         Returns:
             int: Message ID если успешно
         """
-        from hydrogram.errors import FloodWait, PeerIdInvalid, ChatWriteForbidden
+        from telethon.errors import FloodWaitError, PeerIdInvalidError, ChatWriteForbiddenError
         import os
 
         max_retries = 3
@@ -143,52 +143,25 @@ class MessageRouter:
                     if not os.path.exists(media_path):
                         logger.error(f"Media file not found: {media_path}")
                         return None
-
-                    # Определение типа медиа и отправка
-                    file_ext = os.path.splitext(media_path)[1].lower()
-
-                    if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
-                        sent_message = await client.send_photo(
-                            chat_id=chat_id,
-                            photo=media_path,
-                            caption=text or None,
-                            reply_to_message_id=reply_to_message_id
-                        )
-                    elif file_ext in ['.mp4', '.avi', '.mov', '.mkv']:
-                        sent_message = await client.send_video(
-                            chat_id=chat_id,
-                            video=media_path,
-                            caption=text or None,
-                            reply_to_message_id=reply_to_message_id
-                        )
-                    elif file_ext in ['.mp3', '.wav', '.ogg']:
-                        sent_message = await client.send_audio(
-                            chat_id=chat_id,
-                            audio=media_path,
-                            caption=text or None,
-                            reply_to_message_id=reply_to_message_id
-                        )
-                    else:
-                        # Отправка как документ для неизвестных типов
-                        sent_message = await client.send_document(
-                            chat_id=chat_id,
-                            document=media_path,
-                            caption=text or None,
-                            reply_to_message_id=reply_to_message_id
-                        )
+                    sent_message = await client.send_file(
+                        chat_id,
+                        media_path,
+                        caption=text or None,
+                        reply_to=reply_to_message_id
+                    )
                 else:
                     # Отправка текстового сообщения
                     sent_message = await client.send_message(
-                        chat_id=chat_id,
-                        text=text,
-                        reply_to_message_id=reply_to_message_id
+                        chat_id,
+                        text,
+                        reply_to=reply_to_message_id
                     )
 
-                logger.info(f"Message sent successfully via Hydrogram: {sent_message.id}")
+                logger.info(f"Message sent successfully via Telethon: {sent_message.id}")
                 return sent_message.id
 
-            except FloodWait as e:
-                wait_time = e.value
+            except FloodWaitError as e:
+                wait_time = e.seconds
                 logger.warning(f"FloodWait: waiting {wait_time} seconds (attempt {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(wait_time)
@@ -197,12 +170,12 @@ class MessageRouter:
                     logger.error(f"FloodWait limit exceeded for account {account.id}")
                     return None
 
-            except (PeerIdInvalid, ChatWriteForbidden) as e:
+            except (PeerIdInvalidError, ChatWriteForbiddenError) as e:
                 logger.error(f"Cannot send message to chat {chat_id}: {e}")
                 return None
 
             except Exception as e:
-                logger.exception(f"Error sending via Hydrogram (attempt {attempt + 1}): {e}")
+                logger.exception(f"Error sending via Telethon (attempt {attempt + 1}): {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
                     continue

@@ -8,7 +8,7 @@ from crm_app.services.telegram_client_manager import TelegramClientManager
 
 
 class Command(BaseCommand):
-    help = 'Запуск всех активных Telegram аккаунтов (Hydrogram клиенты)'
+    help = 'Запуск всех активных Telegram аккаунтов (Telethon клиенты)'
 
     def handle(self, *args, **options):
         """Запуск всех активных аккаунтов"""
@@ -29,12 +29,10 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING('Нет активных аккаунтов для запуска'))
             return
         
-        # Запуск всех аккаунтов
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
+        # Запуск всех аккаунтов через background loop
         try:
-            loop.run_until_complete(manager.start_all_active())
+            for account in accounts:
+                manager.start_client_sync(account)
             self.stdout.write(
                 self.style.SUCCESS(
                     f'Успешно запущено {len(accounts)} аккаунтов'
@@ -44,5 +42,3 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.ERROR(f'Ошибка при запуске аккаунтов: {e}')
             )
-        finally:
-            loop.close()

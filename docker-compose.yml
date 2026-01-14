@@ -71,6 +71,7 @@ services:
       - REDIS_PORT=6379
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - RUN_TELETHON_CLIENTS=1
     depends_on:
       db:
         condition: service_healthy
