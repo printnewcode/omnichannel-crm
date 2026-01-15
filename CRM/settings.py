@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     
     # Local apps
     'crm_app.apps.CrmAppConfig',
+    'frontend.apps.FrontendConfig',
 ]
 
 MIDDLEWARE = [

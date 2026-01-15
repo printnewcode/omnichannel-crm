@@ -32,7 +32,7 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
     """
     ViewSet для управления Telegram аккаунтами
     """
-    queryset = TelegramAccount.objects.all().order_by('-id')
+    queryset = TelegramAccount.objects.all()
     serializer_class = TelegramAccountSerializer
     permission_classes = [permissions.IsAuthenticated]
     
@@ -42,13 +42,10 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
         account = self.get_object()
         
         if account.account_type == TelegramAccount.AccountType.PERSONAL:
-            # Запуск Telethon клиента
+            # Запуск Hydrogram клиента
             manager = TelegramClientManager()
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                success = loop.run_until_complete(manager.start_client(account))
-                loop.close()
+                success = manager.start_client_sync(account)
                 
                 if success:
                     return Response({'status': 'started'}, status=status.HTTP_200_OK)
@@ -77,10 +74,7 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
         if account.account_type == TelegramAccount.AccountType.PERSONAL:
             manager = TelegramClientManager()
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                success = loop.run_until_complete(manager.stop_client(account.id))
-                loop.close()
+                success = manager.stop_client_sync(account.id)
                 
                 if success:
                     return Response({'status': 'stopped'}, status=status.HTTP_200_OK)
@@ -109,10 +103,7 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
         if account.account_type == TelegramAccount.AccountType.PERSONAL:
             manager = TelegramClientManager()
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                success = loop.run_until_complete(manager.restart_client(account.id))
-                loop.close()
+                success = manager.restart_client_sync(account.id)
                 
                 if success:
                     return Response({'status': 'restarted'}, status=status.HTTP_200_OK)
@@ -136,7 +127,7 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def authenticate(self, request):
         """
-        Начало процесса авторизации Telethon аккаунта
+        Начало процесса авторизации Hydrogram аккаунта
         Пользователь отправляет телефон, получает OTP код
         """
         phone_number = request.data.get('phone_number')
@@ -343,8 +334,9 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
     
     def get_queryset(self):
         """Получить только чаты назначенные оператору"""
-        if self.request.user.is_staff or self.request.user.is_superuser:
-            # Администраторы видят все чаты
+        assigned_only = self.request.query_params.get('assigned_only') in ['1', 'true', 'yes']
+        if (self.request.user.is_staff or self.request.user.is_superuser) and not assigned_only:
+            # Администраторы видят все чаты (если не запрошен фильтр assigned_only)
             return Chat.objects.select_related('telegram_account').order_by('-last_message_at')
 
         try:
@@ -444,6 +436,77 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(
                 {'error': 'Chat is not assigned to this operator'},
                 status=status.HTTP_404_NOT_FOUND
+            )
+
+    @action(detail=True, methods=['post'])
+    def send_message(self, request, pk=None):
+        """Отправить новое сообщение в чат"""
+        chat = self.get_object()
+
+        serializer = SendMessageSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        text = serializer.validated_data['text']
+        media_path = serializer.validated_data.get('media_path')
+
+        # Проверка, что чат назначен оператору
+        try:
+            operator = Operator.objects.get(user=request.user, is_active=True)
+            ChatAssignment.objects.get(
+                chat=chat,
+                operator=operator,
+                is_active=True
+            )
+        except (Operator.DoesNotExist, ChatAssignment.DoesNotExist):
+            return Response(
+                {'error': 'Chat is not assigned to this operator'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Отправка сообщения через MessageRouter
+        router = MessageRouter()
+        try:
+            telegram_message_id = router.send_message(chat, text, media_path)
+
+            if telegram_message_id:
+                # Создание записи об отправленном сообщении
+                outgoing_message = router.create_outgoing_message(
+                    chat=chat,
+                    text=text,
+                    telegram_message_id=telegram_message_id,
+                    message_type='text' if not media_path else 'photo',
+                    media_file_path=media_path
+                )
+
+                # Отправка обновления через WebSocket
+                from channels.layers import get_channel_layer
+                from asgiref.sync import async_to_sync
+
+                channel_layer = get_channel_layer()
+                async_to_sync(channel_layer.group_send)(
+                    f"operator_{operator.user.id}",
+                    {
+                        'type': 'new_message',
+                        'message': MessageSerializer(outgoing_message).data
+                    }
+                )
+
+                return Response({
+                    'status': 'sent',
+                    'message_id': outgoing_message.id,
+                    'telegram_message_id': telegram_message_id
+                }, status=status.HTTP_201_CREATED)
+            else:
+                return Response(
+                    {'error': 'Failed to send message'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+        except Exception as e:
+            logger.exception(f"Error sending message: {e}")
+            return Response(
+                {'error': 'Internal server error'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 

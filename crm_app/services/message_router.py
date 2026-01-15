@@ -77,23 +77,41 @@ class MessageRouter:
     ) -> Optional[int]:
         """
         Синхронная обёртка для отправки ответа
-        
+
         Args:
             message: Модель сообщения на которое отвечаем
             text: Текст ответа
             media_path: Путь к медиа файлу (опционально)
-            
+
         Returns:
             int: Message ID если успешно, None если ошибка
         """
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(
-                self.send_reply_async(message, text, media_path)
-            )
-            loop.close()
-            return result
+            chat = message.chat
+            account = chat.telegram_account
+
+            # Определение способа отправки
+            if account.account_type == TelegramAccount.AccountType.PERSONAL:
+                # Отправка через запущенный Telethon клиент
+                return self.client_manager.send_message_sync(
+                    account_id=account.id,
+                    chat_id=chat.telegram_id,
+                    text=text,
+                    reply_to_message_id=message.telegram_id
+                )
+            elif account.account_type == TelegramAccount.AccountType.BOT:
+                # Отправка через Bot API (создаем event loop для bot api)
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(self.send_reply_async(message, text, media_path))
+                    return result
+                finally:
+                    loop.close()
+            else:
+                logger.error(f"Unknown account type: {account.account_type}")
+                return None
+
         except Exception as e:
             logger.exception(f"Error in send_reply sync wrapper: {e}")
             return None
@@ -324,7 +342,57 @@ class MessageRouter:
                 return None
 
         return None
-    
+
+    def send_message(
+        self,
+        chat: Chat,
+        text: str,
+        media_path: Optional[str] = None
+    ) -> Optional[int]:
+        """
+        Отправить новое сообщение в чат
+
+        Args:
+            chat: Модель чата
+            text: Текст сообщения
+            media_path: Путь к медиа файлу (опционально)
+
+        Returns:
+            int: Message ID если успешно, None если ошибка
+        """
+        try:
+            account = chat.telegram_account
+
+            # Определение способа отправки
+            if account.account_type == TelegramAccount.AccountType.PERSONAL:
+                # Отправка через запущенный Telethon клиент
+                return self.client_manager.send_message_sync(
+                    account_id=account.id,
+                    chat_id=chat.telegram_id,
+                    text=text
+                )
+            elif account.account_type == TelegramAccount.AccountType.BOT:
+                # Отправка через Bot API (создаем event loop для bot api)
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(self._send_via_bot_api(
+                        account=account,
+                        chat_id=chat.telegram_id,
+                        text=text,
+                        media_path=media_path
+                    ))
+                    return result
+                finally:
+                    loop.close()
+            else:
+                logger.error(f"Unknown account type: {account.account_type}")
+                return None
+
+        except Exception as e:
+            logger.exception(f"Error sending message: {e}")
+        return None
+
     def create_outgoing_message(
         self,
         chat: Chat,

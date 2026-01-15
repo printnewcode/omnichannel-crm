@@ -14,6 +14,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import (
     FloodWaitError,
+    RPCError,
     AuthKeyUnregisteredError,
     UserDeactivatedError,
     PhoneCodeInvalidError,
@@ -235,6 +236,36 @@ class TelegramClientManager:
         except Exception as e:
             logger.exception(f"Error stopping client for account {account_id}: {e}")
             return False
+
+    def send_message_sync(
+        self,
+        account_id: int,
+        chat_id: int,
+        text: str,
+        reply_to_message_id: Optional[int] = None
+    ) -> Optional[int]:
+        """
+        Синхронная обертка для отправки сообщения через запущенный клиент
+
+        Args:
+            account_id: ID аккаунта
+            chat_id: Telegram Chat ID
+            text: Текст сообщения
+            reply_to_message_id: ID сообщения для ответа
+
+        Returns:
+            int: Message ID если успешно, None если ошибка
+        """
+        try:
+            loop = self._ensure_background_loop()
+            future = asyncio.run_coroutine_threadsafe(
+                self.send_message(account_id, chat_id, text, reply_to_message_id),
+                loop
+            )
+            return future.result(timeout=15)
+        except Exception as e:
+            logger.exception(f"Error in send_message_sync: {e}")
+            return None
     
     async def send_message(
         self,
@@ -269,9 +300,9 @@ class TelegramClientManager:
             
             # Обновление последней активности
             try:
-                account = TelegramAccount.objects.get(id=account_id)
+                account = await sync_to_async(TelegramAccount.objects.get)(id=account_id)
                 account.last_activity = timezone.now()
-                account.save(update_fields=['last_activity'])
+                await sync_to_async(account.save)(update_fields=['last_activity'])
             except TelegramAccount.DoesNotExist:
                 pass
             
@@ -282,6 +313,14 @@ class TelegramClientManager:
             # Можно добавить retry с задержкой
             await asyncio.sleep(e.seconds)
             return await self.send_message(account_id, chat_id, text, reply_to_message_id)
+        except RPCError as e:
+            logger.error(
+                "Telegram RPC error while sending message: %s (code=%s, value=%s)",
+                e.__class__.__name__,
+                getattr(e, "code", None),
+                getattr(e, "value", None),
+            )
+            return None
         except Exception as e:
             logger.exception(f"Error sending message: {e}")
             return None
