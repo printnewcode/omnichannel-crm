@@ -1,98 +1,98 @@
 # Omnichannel CRM System
 
-Omnichannel CRM-система для сбора сообщений с разных мессенджеров (Telegram) и ответа с одного WEB-сайта.
+Omnichannel CRM system for collecting messages from different messengers (Telegram) and responding from a single WEB interface.
 
-## Технический стек
+## Tech Stack
 
 - **Backend**: Python 3.12+, Django 5.1+, Django REST Framework
-- **Database**: MySQL 8.0+ (оптимизировано для высоконагруженных записей)
-- **Telegram**: Telethon (личные аккаунты) + Bot API (боты)
+- **Database**: MySQL 8.0+ (optimized for high-load operations)
+- **Telegram**: Telethon (personal accounts) + Bot API (bots)
 - **Real-time**: Django Channels + WebSockets
 - **Background Tasks**: Celery + Redis
 - **Deployment**: Docker Compose
 
-## Основные возможности
+## Key Features
 
-- ✅ Управление несколькими личными Telegram аккаунтами через Telethon
-- ✅ Интеграция с существующими ботами через webhook
-- ✅ Единый веб-интерфейс для всех чатов
-- ✅ Real-time обновления через WebSockets
-- ✅ Multi-tenant система (операторы видят только назначенные чаты)
-- ✅ Автоматическая загрузка медиа файлов
-- ✅ Система мониторинга здоровья
+- ✅ Management of multiple personal Telegram accounts via Telethon
+- ✅ Integration with existing bots via webhook
+- ✅ Unified web interface for all chats
+- ✅ Real-time updates via WebSockets
+- ✅ Multi-tenant system (operators see only assigned chats)
+- ✅ Automatic media file downloads
+- ✅ Health monitoring system
 
-## Быстрый старт
+## Quick Start
 
-### Docker Compose (рекомендуется)
+### Docker Compose (recommended)
 
 ```bash
-# 1. Клонировать репозиторий
+# 1. Clone the repository
 git clone https://github.com/printnewcode/omnichannel-crm.git
 cd omnichannel-crm
 
-# 2. Запустить все сервисы
+# 2. Start all services
 docker-compose up -d
 
-# 3. Применить миграции
+# 3. Apply migrations
 docker-compose exec web python manage.py migrate
 
-# 4. Создать суперпользователя
+# 4. Create superuser
 docker-compose exec web python manage.py createsuperuser
 
-# 5. Открыть админку
+# 5. Open admin panel
 # http://localhost:8000/admin/
 ```
 
-### Структура проекта
+### Project Structure
 
 ```
 omnichannel-crm/
-├── CRM/                    # Основной проект Django
-├── crm_app/               # Основное приложение
-│   ├── models.py          # Модели БД
+├── CRM/                    # Main Django project
+├── crm_app/               # Main application
+│   ├── models.py          # Database models
 │   ├── views.py           # REST API
-│   ├── services/          # Бизнес-логика
+│   ├── services/          # Business logic
 │   └── ...
-├── docker-compose.yml     # Docker конфигурация
-└── requirements.txt       # Python зависимости
+├── docker-compose.yml     # Docker configuration
+└── requirements.txt       # Python dependencies
 ```
 
-## Использование
+## Usage
 
-### Добавление Telegram аккаунта
+### Adding Telegram Account
 
-1. **Перейдите в админку** `http://localhost:8000/admin/`
-2. **Добавьте аккаунт** в раздел "Telegram Accounts"
-3. **Для личного аккаунта** заполните:
-   - Name (описательное имя)
-   - Account type: "Личный аккаунт (Telethon)"
+1. **Go to admin panel** `http://localhost:8000/admin/`
+2. **Add account** in the "Telegram Accounts" section
+3. **For personal account** fill in:
+   - Name (descriptive name)
+   - Account type: "Personal Account (Telethon)"
    - Phone number (+1234567890)
-   - API ID и API Hash (с https://my.telegram.org/)
-4. **Сохраните и пройдите аутентификацию** через API
+   - API ID and API Hash (from https://my.telegram.org/)
+4. **Save and complete authentication** via API
 
-### Добавление бота
+### Adding Bot
 
-1. **Получите токен** у @BotFather в Telegram
-2. **Добавьте аккаунт** в админку:
-   - Name (имя бота)
-   - Account type: "Бот (pyTelegramBotAPI)"
-   - Bot token (от @BotFather)
-   - Bot username (без @)
+1. **Get token** from @BotFather in Telegram
+2. **Add account** in admin panel:
+   - Name (bot name)
+   - Account type: "Bot (pyTelegramBotAPI)"
+   - Bot token (from @BotFather)
+   - Bot username (without @)
 
-### Настройка webhook для бота
+### Bot Webhook Setup
 
-Для существующего бота настройте webhook на:
+For existing bot, set webhook to:
 ```
 https://your-domain.com/api/webhook/bot/?token=YOUR_BOT_TOKEN
 ```
 
-## Тестирование
+## Testing
 
 ```bash
-# Запуск автоматического тестирования
+# Run automated testing
 docker-compose exec web python test_setup.py
 ```
 
-## Лицензия
+## License
 
 Apache-2.0
