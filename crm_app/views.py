@@ -13,6 +13,7 @@ from django.utils import timezone
 from django.conf import settings
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from django.shortcuts import redirect
 from .models import (
     TelegramAccount, Chat, Message, Operator, ChatAssignment
 )
@@ -651,6 +652,30 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=True, methods=['get'])
+    def download_media(self, request, pk=None):
+        """Скачать медиа файл по запросу"""
+        message = self.get_object()
+
+        # Если файл уже скачан - вернуть его
+        if message.media_file_path:
+            return redirect(f'/media/{message.media_file_path}')
+
+        # Если файл не скачан - скачать по message.telegram_id
+        # Проверяем что это медиа-сообщение без файла
+        if message.message_type and message.message_type != 'text' and not message.media_file_path:
+            try:
+                manager = TelegramClientManager()
+                # Используем sync версию метода
+                media_path = manager.download_media_by_message_id_sync(message)
+                if media_path:
+                    return redirect(f'/media/{media_path}')
+            except Exception as e:
+                logger.exception(f"Error downloading media: {e}")
+                return Response({'error': 'Failed to download media'}, status=500)
+
+        return Response({'error': 'Media not available'}, status=404)
 
 
 class BotWebhookView(APIView):

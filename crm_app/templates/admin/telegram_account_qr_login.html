@@ -1,0 +1,36 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+  <h1>QR вход: {{ account.name }}</h1>
+
+  {% if status_message %}
+    <p>{{ status_message }}</p>
+  {% endif %}
+
+  {% if qr_image_b64 %}
+    <div style="margin: 16px 0;">
+      <img src="data:image/png;base64,{{ qr_image_b64 }}" alt="QR code" />
+    </div>
+  {% endif %}
+
+  <form method="post" style="margin-top: 12px;">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="check" />
+    <div style="margin-bottom: 8px;">
+      <label for="password">Пароль 2FA (если требуется):</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" />
+    </div>
+    <button type="submit" class="default">Отправить</button>
+  </form>
+
+  <form method="post" style="margin-top: 12px;">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="refresh" />
+    <button type="submit">Обновить QR</button>
+  </form>
+
+  <p style="margin-top: 12px;">
+    <a href="{% url 'admin:crm_app_telegramaccount_change' account.id %}">Назад к аккаунту</a>
+  </p>
+{% endblock %}

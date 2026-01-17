@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 from typing import Dict, Optional, List
 from django.conf import settings
 from django.utils import timezone
@@ -62,7 +63,7 @@ class TelegramClientManager:
                 self._loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(self._loop)
         return self._loop
-
+    
     def _ensure_background_loop(self) -> asyncio.AbstractEventLoop:
         """Ensure a persistent background loop for long-lived clients."""
         if self._loop and self._loop.is_running():
@@ -83,32 +84,32 @@ class TelegramClientManager:
         loop = self._ensure_background_loop()
         future = asyncio.run_coroutine_threadsafe(self.start_client(account), loop)
         return future.result()
-
+    
     async def start_client(self, account: TelegramAccount) -> bool:
         """
         Запустить Telethon клиент для аккаунта
-
+        
         Args:
             account: TelegramAccount модель
-
+            
         Returns:
             bool: True если успешно запущен
         """
         if account.account_type != TelegramAccount.AccountType.PERSONAL:
             logger.error(f"Account {account.id} is not a personal account")
             return False
-
+        
         if account.id in self._clients:
             logger.warning(f"Client for account {account.id} already running")
             return True
-
+        
         if not account.session_string and account.status != TelegramAccount.AccountStatus.AUTHENTICATING:
             logger.error(f"No session string for account {account.id}")
             account.status = TelegramAccount.AccountStatus.ERROR
             account.last_error = "Отсутствует session string. Требуется авторизация"
             await sync_to_async(account.save)()
             return False
-
+        
         try:
             # Создание клиента Telethon
             client = TelegramClient(
@@ -125,7 +126,7 @@ class TelegramClientManager:
                 await sync_to_async(account.save)()
                 await client.disconnect()
                 return False
-
+            
             # Получение информации о пользователе
             me = await client.get_me()
             account.telegram_user_id = me.id
@@ -147,18 +148,18 @@ class TelegramClientManager:
                 self._create_message_handler(account),
                 events.NewMessage()
             )
-
+            
             # Сохранение клиента и запуск задачи прослушивания
             self._clients[account.id] = client
-
+            
             # Запуск задачи для обработки обновлений
             loop = await self._get_or_create_loop()
             task = loop.create_task(self._listen_updates(client, account))
             self._tasks[account.id] = task
-
+            
             logger.info(f"Successfully started client for account {account.id}")
             return True
-
+            
         except AuthKeyUnregisteredError:
             logger.error(f"Auth key unregistered for account {account.id}")
             account.status = TelegramAccount.AccountStatus.ERROR
@@ -190,7 +191,7 @@ class TelegramClientManager:
         loop = self._ensure_background_loop()
         future = asyncio.run_coroutine_threadsafe(self.stop_client(account_id), loop)
         return future.result()
-
+    
     async def stop_client(self, account_id: int) -> bool:
         """
         Остановить клиент для аккаунта
@@ -328,8 +329,7 @@ class TelegramClientManager:
     def _create_message_handler(self, account: TelegramAccount):
         """Создать обработчик сообщений для аккаунта (Telethon)"""
         from channels.layers import get_channel_layer
-        from asgiref.sync import async_to_sync
-
+        
         async def handle_message(event):
             """Обработка входящих сообщений"""
             from ..models import Chat, Message as MessageModel
@@ -388,6 +388,8 @@ class TelegramClientManager:
                 message_type = self._get_message_type(message)
                 media_file_id = self._get_media_file_id(message)
 
+                logger.info(f"Processing message {message.id}: type={message_type}, has_media={bool(message.media)}, photo={bool(getattr(message, 'photo', None))}, video={bool(getattr(message, 'video', None))}")
+
                 # Создание записи сообщения в БД
                 @database_sync_to_async
                 def create_message_record():
@@ -402,6 +404,8 @@ class TelegramClientManager:
                             )
                         except MessageModel.DoesNotExist:
                             pass
+
+                    # Telegram file_id не нужен, скачиваем по message.telegram_id
 
                     # Создание сообщения (дедупликация по telegram_id + chat)
                     try:
@@ -424,29 +428,36 @@ class TelegramClientManager:
                             }
                         )
                     except IntegrityError:
-                        # В случае гонки просто читаем существующее сообщение
-                        message_obj = MessageModel.objects.get(
-                            telegram_id=message.id,
-                            chat=chat
-                        )
+                        # В случае гонки или других ошибок дублирования
+                        try:
+                            message_obj = MessageModel.objects.get(
+                                telegram_id=message.id,
+                                chat=chat
+                            )
+                        except MessageModel.DoesNotExist:
+                            # Если сообщение всё же не существует, пропускаем
+                            return None
 
-                    # Обновление статистики чата
+                    return message_obj
+
+                message_obj = await create_message_record()
+
+                # Если сообщение не удалось создать/получить, пропускаем обработку
+                if message_obj is None:
+                    return
+
+                # Обновление статистики чата
+                @database_sync_to_async
+                def update_chat_stats():
                     chat.message_count += 1
                     chat.last_message_at = message.date
                     if not message.out:
                         chat.unread_count += 1
                     chat.save(update_fields=['message_count', 'last_message_at', 'unread_count'])
 
-                    return message_obj
+                await update_chat_stats()
 
-                message_obj = await create_message_record()
-
-                # Обработка медиа если есть
-                if message.media and message_type in ['photo', 'video', 'voice', 'document']:
-                    try:
-                        await self._download_media_telethon(event.client, message, message_obj)
-                    except Exception as e:
-                        logger.exception(f"Error downloading media via Telethon: {e}")
+                # Telegram file_id уже сохранен при создании сообщения
 
                 # Отправка real-time обновления через WebSocket
                 try:
@@ -466,7 +477,7 @@ class TelegramClientManager:
 
                     # Отправка обновления каждому оператору
                     for operator_id in operator_ids:
-                        async_to_sync(channel_layer.group_send)(
+                        await channel_layer.group_send(
                             f"operator_{operator_id}",
                             {
                                 'type': 'new_message',
@@ -489,7 +500,7 @@ class TelegramClientManager:
                         )
 
                         # Отправка обновления чата
-                        async_to_sync(channel_layer.group_send)(
+                        await channel_layer.group_send(
                             f"operator_{operator_id}",
                             {
                                 'type': 'chat_updated',
@@ -509,10 +520,10 @@ class TelegramClientManager:
                     logger.exception(f"Error sending WebSocket update: {e}")
 
                 logger.info(f"Processed incoming message {message.id} for chat {chat.id}")
-
+                
             except Exception as e:
                 logger.exception(f"Error handling message: {e}")
-
+        
         return handle_message
     
     def _get_message_type(self, message) -> str:
@@ -533,12 +544,12 @@ class TelegramClientManager:
             return 'location'
         if getattr(message, 'contact', None):
             return 'contact'
-        return 'text'
+            return 'text'
     
     def _get_media_file_id(self, message) -> Optional[str]:
         """Telethon не предоставляет file_id как в Bot API"""
         return None
-
+    
     async def _download_media_telethon(self, client: TelegramClient, message, message_obj):
         """Скачать медиа через Telethon клиент"""
         import os
@@ -561,7 +572,7 @@ class TelegramClientManager:
             # Сохранение пути в БД
             relative_path = f"telegram/{message_obj.message_type}/{file_name}"
             message_obj.media_file_path = relative_path
-            message_obj.save(update_fields=['media_file_path'])
+            await sync_to_async(message_obj.save)(update_fields=['media_file_path'])
 
             logger.info(f"Downloaded media for message {message_obj.id}: {local_path}")
 
@@ -580,6 +591,171 @@ class TelegramClientManager:
             if hasattr(message.document, 'file_name') and message.document.file_name:
                 _, ext = os.path.splitext(message.document.file_name)
                 return ext or '.bin'
+            return '.bin'
+        return '.bin'
+
+    def _get_telegram_file_id(self, message) -> Optional[str]:
+        """Получить file_id из сообщения Telegram для ленивой загрузки"""
+        try:
+            logger.info(f"Getting file_id for message media: {type(message.media)}")
+            if hasattr(message.media, 'file_id'):
+                logger.info(f"Found file_id: {message.media.file_id}")
+                return message.media.file_id
+            elif hasattr(message.media, 'id'):
+                logger.info(f"Found id: {message.media.id}")
+                return str(message.media.id)
+            elif hasattr(message.media, 'file_ref'):
+                logger.info(f"Found file_ref: {message.media.file_ref}")
+                return message.media.file_ref
+            else:
+                logger.warning(f"No file_id/id/file_ref found in media object: {dir(message.media)}")
+        except Exception as e:
+            logger.exception(f"Error getting file_id: {e}")
+        return None
+
+    def download_media_by_message_id_sync(self, message) -> Optional[str]:
+        """Sync версия для скачивания медиа по message.telegram_id"""
+        import asyncio
+        import concurrent.futures
+
+        # Используем ThreadPoolExecutor для выполнения в фоне
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(self._download_in_background, message)
+            try:
+                return future.result(timeout=30)  # 30 секунд таймаут
+            except concurrent.futures.TimeoutError:
+                raise Exception("Download timeout")
+            except Exception as e:
+                raise e
+
+    def _download_in_background(self, message) -> Optional[str]:
+        """Выполнить скачивание в фоне"""
+        import asyncio
+
+        # Создаем новый event loop для этого потока
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            return loop.run_until_complete(self._download_with_fresh_client(message))
+        finally:
+            loop.close()
+
+    async def _download_with_fresh_client(self, message) -> Optional[str]:
+        """Скачать медиа используя новый клиент"""
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        # Найти аккаунт для этого сообщения
+        account = await sync_to_async(lambda: message.chat.telegram_account)()
+
+        # Создать новый клиент для скачивания
+        client = TelegramClient(StringSession(account.session_string), account.api_id, account.api_hash)
+        await client.connect()
+
+        try:
+            # Получить сообщение из Telegram по ID
+            logger.info(f"Downloading media for message {message.id} (telegram_id: {message.telegram_id}) in chat {message.chat.telegram_id}")
+
+            chat_entity = await client.get_entity(message.chat.telegram_id)
+            telegram_message = await client.get_messages(chat_entity, ids=[message.telegram_id])
+
+            if not telegram_message or not telegram_message[0]:
+                raise Exception(f"Message {message.telegram_id} not found in chat {message.chat.telegram_id}")
+
+            telegram_message = telegram_message[0]
+
+            if not telegram_message.media:
+                raise Exception(f"Message {message.telegram_id} has no media")
+
+            # Создать директорию
+            media_dir = settings.BASE_DIR / 'media' / 'telegram' / message.message_type
+            media_dir.mkdir(parents=True, exist_ok=True)
+
+            # Имя файла
+            ext = self._get_file_extension_from_message_type(message.message_type)
+            file_name = f"{message.id}_{message.telegram_id}_{message.telegram_date.timestamp()}{ext}"
+            local_path = media_dir / file_name
+
+            # Скачать медиа
+            await client.download_media(telegram_message, file=str(local_path))
+
+            # Сохранить путь
+            relative_path = f"telegram/{message.message_type}/{file_name}"
+            message.media_file_path = relative_path
+            await sync_to_async(message.save)(update_fields=['media_file_path'])
+
+            logger.info(f"Successfully downloaded media to {local_path}")
+            return relative_path
+
+        finally:
+            await client.disconnect()
+
+    async def download_media_by_message_id(self, message) -> Optional[str]:
+        """Скачать медиа по message.telegram_id для ленивой загрузки"""
+        # Найти подходящий клиент (активный)
+        client = None
+        account = None
+        for acc_id, cl in self._clients.items():
+            if cl.is_connected():
+                client = cl
+                account = await sync_to_async(TelegramAccount.objects.get)(id=acc_id)
+                break
+
+        if not client or not account:
+            raise Exception("No active Telegram client available")
+
+        try:
+            logger.info(f"Downloading media for message {message.id} (telegram_id: {message.telegram_id}) in chat {message.chat.telegram_id}")
+
+            # Получить сообщение из Telegram по ID
+            chat_entity = await client.get_entity(message.chat.telegram_id)
+            logger.info(f"Got chat entity: {chat_entity}")
+
+            telegram_message = await client.get_messages(chat_entity, ids=[message.telegram_id])
+            logger.info(f"Got messages: {len(telegram_message) if telegram_message else 0}")
+
+            if not telegram_message or not telegram_message[0]:
+                raise Exception(f"Message {message.telegram_id} not found in chat {message.chat.telegram_id}")
+
+            telegram_message = telegram_message[0]
+            logger.info(f"Message has media: {bool(telegram_message.media)}")
+
+            if not telegram_message.media:
+                raise Exception(f"Message {message.telegram_id} has no media")
+
+            # Создать директорию
+            media_dir = settings.BASE_DIR / 'media' / 'telegram' / message.message_type
+            media_dir.mkdir(parents=True, exist_ok=True)
+
+            # Имя файла
+            ext = self._get_file_extension_from_message_type(message.message_type)
+            file_name = f"{message.id}_{message.telegram_id}_{message.telegram_date.timestamp()}{ext}"
+            local_path = media_dir / file_name
+
+            # Скачать медиа
+            await client.download_media(telegram_message, file=str(local_path))
+
+            # Сохранить путь
+            relative_path = f"telegram/{message.message_type}/{file_name}"
+            message.media_file_path = relative_path
+            await sync_to_async(message.save)(update_fields=['media_file_path'])
+
+            return relative_path
+
+        except Exception as e:
+            logger.exception(f"Error downloading media by message_id: {e}")
+            raise
+
+    def _get_file_extension_from_message_type(self, message_type: str) -> str:
+        """Получить расширение файла по типу сообщения"""
+        if message_type == 'photo':
+            return '.jpg'
+        elif message_type == 'video':
+            return '.mp4'
+        elif message_type == 'voice':
+            return '.ogg'
+        elif message_type == 'document':
             return '.bin'
         return '.bin'
 
@@ -619,7 +795,7 @@ class TelegramClientManager:
             logger.exception(f"Error in listen_updates for account {account.id}: {e}")
             account.status = TelegramAccount.AccountStatus.ERROR
             account.last_error = str(e)
-            account.save()
+            await sync_to_async(account.save)()
     
     def authenticate_account_sync(self, account: TelegramAccount) -> dict:
         """Sync wrapper for authenticate_account"""
@@ -1092,7 +1268,7 @@ class TelegramClientManager:
         loop = self._ensure_background_loop()
         future = asyncio.run_coroutine_threadsafe(self.restart_client(account_id), loop)
         return future.result()
-
+    
     async def restart_client(self, account_id: int) -> bool:
         """Перезапустить клиент"""
         await self.stop_client(account_id)
@@ -1101,11 +1277,11 @@ class TelegramClientManager:
             return await self.start_client(account)
         except TelegramAccount.DoesNotExist:
             return False
-
+    
     def get_running_accounts(self) -> List[int]:
         """Получить список ID запущенных аккаунтов"""
         return list(self._clients.keys())
-
+    
     async def create_qr_login(self, account: TelegramAccount) -> dict:
         """Создать QR login для Telethon (async wrapper)"""
         return self.create_qr_login_sync(account)
@@ -1239,7 +1415,14 @@ class TelegramClientManager:
         if entry.get('status') == 'password_required' and password:
             entry['password'] = password
             entry['password_event'].set()
-            return {'success': True, 'status': 'pending', 'qr_url': entry.get('qr_url')}
+            # Give the worker a short time to finalize auth after 2FA submit.
+            start = time.monotonic()
+            while time.monotonic() - start < 8:
+                if entry.get('status') == 'authenticated' and entry.get('session_string'):
+                    break
+                if entry.get('status') == 'error':
+                    break
+                time.sleep(0.2)
 
         if entry.get('status') == 'authenticated' and entry.get('session_string'):
             session_string = entry['session_string']
@@ -1262,24 +1445,54 @@ class TelegramClientManager:
             self._qr_logins.pop(account.id, None)
             return {'success': False, 'error': error}
 
-        return {'success': True, 'status': entry.get('status', 'pending'), 'qr_url': entry.get('qr_url')}
+        # For normal "check" requests, wait briefly to avoid requiring a second click.
+        if entry.get('status') in {'pending', 'password_required'}:
+            start = time.monotonic()
+            while time.monotonic() - start < 3:
+                if entry.get('status') == 'authenticated' and entry.get('session_string'):
+                    break
+                if entry.get('status') == 'error':
+                    break
+                time.sleep(0.2)
 
+        if entry.get('status') == 'authenticated' and entry.get('session_string'):
+            session_string = entry['session_string']
+            account.session_string = session_string
+            account.pending_session_string = None
+            account.pending_session_name = None
+            account.pending_phone_code_hash = None
+            account.pending_code_sent_at = None
+            account.pending_code_type = None
+            account.status = TelegramAccount.AccountStatus.ACTIVE
+            account.last_error = None
+            account.error_count = 0
+            account.save()
+            self._qr_logins.pop(account.id, None)
+            return {'success': True, 'status': 'authenticated'}
+
+        if entry.get('status') == 'error':
+            error = entry.get('error', 'Unknown error')
+            self._qr_logins.pop(account.id, None)
+            return {'success': False, 'error': error}
+
+        return {'success': True, 'status': entry.get('status', 'pending'), 'qr_url': entry.get('qr_url')}
+    
     async def start_all_active(self):
         """Запустить все активные аккаунты"""
         @sync_to_async
         def get_accounts():
             return list(TelegramAccount.objects.filter(
-                account_type=TelegramAccount.AccountType.PERSONAL,
-                status__in=[
-                    TelegramAccount.AccountStatus.ACTIVE,
-                    TelegramAccount.AccountStatus.INACTIVE
-                ]
+            account_type=TelegramAccount.AccountType.PERSONAL,
+            status__in=[
+                TelegramAccount.AccountStatus.ACTIVE,
+                TelegramAccount.AccountStatus.INACTIVE
+            ]
             ))
-
+        
         accounts = await get_accounts()
         for account in accounts:
             self.start_client_sync(account)
-
+    
     async def stop_all(self):
         """Остановить все клиенты"""
         account_ids = list(self._clients.keys())

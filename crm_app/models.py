@@ -253,6 +253,7 @@ class Message(models.Model):
     media_file_id = models.CharField(max_length=255, null=True, blank=True)
     media_file_path = models.CharField(max_length=500, null=True, blank=True)
     media_caption = models.TextField(null=True, blank=True)
+    telegram_file_id = models.CharField(max_length=255, null=True, blank=True, help_text="Telegram file ID для повторного скачивания")
     
     # Временные метки
     telegram_date = models.DateTimeField(db_index=True, verbose_name="Дата в Telegram")
