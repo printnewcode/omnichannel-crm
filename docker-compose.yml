@@ -195,9 +195,9 @@ services:
     container_name: omnichannel_crm_nginx
     restart: unless-stopped
     ports:
-      - "${HTTPS_PORT:-443}:443"
-      - "${HTTP_PORT:-80}:80"
-      - "8080:8080"  # Health check port
+      - "4443:443"  # Было 443:443
+      - "8081:80"   # Было 80:80
+      - "8080:8080"
     volumes:
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - ./docker/ssl/crm.crt:/etc/ssl/certs/crm.crt:ro
