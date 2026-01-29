@@ -202,7 +202,9 @@ services:
       - db
       - redis
       - web
-    volumes:
+    networks:
+      - crm_network
+  volumes:
       - mysql_data:
         driver: local
       - redis_data:
@@ -215,5 +217,3 @@ services:
         driver: local
       - logs_volume:
         driver: local
-    networks:
-      - crm_network
