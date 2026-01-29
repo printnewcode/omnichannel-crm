@@ -1,32 +1,48 @@
 version: '3.8'
 
 services:
-  # MySQL 8.0 Database
   db:
     image: mysql:8.0
     container_name: omnichannel_crm_db
     restart: unless-stopped
     environment:
-      # Эти переменные автоматически создадут базу данных и пользователя при первом запуске
       MYSQL_DATABASE: ${DB_NAME:-omnichannel_crm}
       MYSQL_USER: ${DB_USER:-crm_user}
       MYSQL_PASSWORD: ${DB_PASSWORD:-crm_password}
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_password}
+      # Оптимизация через переменные окружения
+      MYSQL_INNODB_BUFFER_POOL_SIZE: 256M
+      MYSQL_MAX_CONNECTIONS: 50
+      MYSQL_INNODB_LOG_FILE_SIZE: 64M
+      MYSQL_INNODB_FLUSH_LOG_AT_TRX_COMMIT: 2
+      MYSQL_INNODB_FLUSH_METHOD: O_DIRECT
+      MYSQL_PERFORMANCE_SCHEMA: 0  # Отключаем для экономии
     volumes:
       - mysql_data:/var/lib/mysql
-      # Скрипт init.sql выполнится автоматически при первом запуске контейнера
       - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      # Добавьте кастомный my.cnf для полного контроля
+      - ./docker/mysql/my.cnf:/etc/mysql/conf.d/custom.cnf:ro
     ports:
       - "${DB_PORT:-3306}:3306"
-    command: --default-authentication-plugin=mysql_native_password --innodb-buffer-pool-size=1G --max-connections=500 --innodb-log-file-size=256M
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --innodb-buffer-pool-size=256M
+      --max-connections=50
+      --innodb-log-file-size=64M
+      --innodb-flush-log-at-trx-commit=2
+      --performance-schema=OFF
+      --table-definition-cache=400
+      --table-open-cache=2000
     networks:
       - crm_network
+    mem_limit: 512m  # Жесткое ограничение RAM
+    cpus: 0.5  # Ограничение CPU
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-root_password}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 60s  # Даем больше времени на инициализацию
+      interval: 30s  # Увеличиваем интервал
+      timeout: 10s
+      retries: 5
+      start_period: 90s
 
   # Redis для Celery и Channels
   redis:
