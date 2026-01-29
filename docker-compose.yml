@@ -78,6 +78,8 @@ services:
       - logs_volume:/app/logs
     expose:
       - "8082"
+    ports:
+      - "127.0.0.1:8082:8000"
     env_file:
       - .env
     environment:
@@ -164,6 +166,8 @@ services:
       - logs_volume:/app/logs
     expose:
       - "8001"
+    ports:
+      - "127.0.0.1:8001:8000" 
     env_file:
       - .env
     environment:
