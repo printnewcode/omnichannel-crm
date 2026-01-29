@@ -204,3 +204,21 @@ services:
       - web
     networks:
       - crm_network
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  static_volume:
+    driver: local
+  media_volume:
+    driver: local
+  sessions_volume:
+    driver: local
+  logs_volume:
+    driver: local
+
+networks:
+  crm_network:
+    driver: bridge
