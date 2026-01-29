@@ -77,7 +77,7 @@ services:
       - sessions_volume:/app/sessions
       - logs_volume:/app/logs
     expose:
-      - "8000"
+      - "8082"
     env_file:
       - .env
     environment:
