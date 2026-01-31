@@ -6,8 +6,10 @@ Omnichannel CRM система для управления Telegram источн
 
 from pathlib import Path
 import os
+from dotenv import load_dotenv
 from decouple import config, Csv
 
+load_dotenv()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -19,10 +21,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-e(v17v9%x0+=x7hm*4x@*^)y*#_t$j)3hv5hb2q&s0p)4t-)s$')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = config('DEBUG', default=True, cast=bool)
-
-ALLOWED_HOSTS = ["*"]
-
+DEBUG = os.getenv('DEBUG', False)  #config('DEBUG', default=False, cast=bool)
+LOCAL = os.getenv('LOCAL', False)  #config('LOCAL', default=False, cast=bool)
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
+DOMAIN = os.getenv('DOMAIN', '')
+HOOK = os.getenv('HOOK', 'False').lower() == 'true'
 
 # Application definition
 
@@ -80,29 +83,24 @@ ASGI_APPLICATION = 'CRM.asgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 # MySQL 8.0+ для высоконагруженных записей
-
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': config('DB_NAME', default='omnichannel_crm'),
-        'USER': config('DB_USER', default='crm_user'),
-        'PASSWORD': config('DB_PASSWORD', default='crm_password'),
-        'HOST': config('DB_HOST', default='localhost'),
-        'PORT': config('DB_PORT', default='3306'),
-        'OPTIONS': {
-            'charset': 'utf8mb4',
-            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-            'autocommit': True,
-            # Оптимизация для высоконагруженных записей
-            'isolation_level': 'read committed',  # Уменьшение deadlocks
-            # Docker/MySQL connection settings
-            'connect_timeout': 60,
-            'read_timeout': 60,
-            'write_timeout': 60,
-        },
-        'CONN_MAX_AGE': 300,  # Переиспользование соединений
-    }
+if bool(LOCAL):
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
 }
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.mysql",
+            "NAME": os.getenv("NAME_DB"),
+            "USER": os.getenv("NAME_DB"),
+            "PASSWORD": os.getenv("PASS_DB"),
+            "HOST": "127.0.0.1",
+        }
+    }
+
 
 # Для разработки можно использовать SQLite (закомментировать MySQL выше и раскомментировать ниже)
 # DATABASES = {
@@ -184,44 +182,17 @@ REST_FRAMEWORK = {
 
 
 # Django Channels
-# https://channels.readthedocs.io/en/stable/topics/channel_layers.html
-
+# For shared hosting, we use polling, but keep layers for internal signal routing if needed.
 CHANNEL_LAYERS = {
     'default': {
-        'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        'CONFIG': {
-            "hosts": [(config('REDIS_HOST', default='localhost'), config('REDIS_PORT', default=6379, cast=int))],
-            "capacity": 1500,  # Максимальное количество сообщений в канале
-            "expiry": 10,  # Время жизни сообщения в секундах
-        },
+        'BACKEND': 'channels.layers.InMemoryChannelLayer'
     },
 }
 
-# Альтернативный вариант для разработки (InMemoryChannelLayer)
-# CHANNEL_LAYERS = {
-#     'default': {
-#         'BACKEND': 'channels.layers.InMemoryChannelLayer'
-#     },
-# }
 
-
-# Celery Configuration
-# https://docs.celeryproject.org/en/stable/django/first-steps-with-django.html
-
-CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://localhost:6379/0')
-CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://localhost:6379/0')
-CELERY_ACCEPT_CONTENT = ['json']
-CELERY_TASK_SERIALIZER = 'json'
-CELERY_RESULT_SERIALIZER = 'json'
-CELERY_TIMEZONE = TIME_ZONE
-CELERY_BEAT_SCHEDULE = {
-    'cleanup-old-messages': {
-        'task': 'crm_app.tasks.cleanup_old_messages',
-        'schedule': 86400.0,  # Каждый день
-    },
-}
-CELERY_TASK_ACKS_LATE = True  # Подтверждение после выполнения
-CELERY_WORKER_PREFETCH_MULTIPLIER = 1  # Не брать задачи заранее (для лучшей балансировки)
+# Celery is disabled for shared hosting (using Cron instead)
+CELERY_BROKER_URL = None
+CELERY_RESULT_BACKEND = None
 
 
 # CORS settings
@@ -303,8 +274,8 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = config('SECURE_HSTS_INCLUDE_SUBDOMAINS', defaul
 SECURE_HSTS_PRELOAD = config('SECURE_HSTS_PRELOAD', default=True, cast=bool)
 
 # Cookies and sessions
-SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=False, cast=bool)
-CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=False, cast=bool)
+SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', 'False').lower() == 'true'
+CSRF_COOKIE_SECURE = os.getenv('CSRF_COOKIE_SECURE', 'False').lower() == 'true'
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = 'Lax'
@@ -316,9 +287,16 @@ SECURE_BROWSER_XSS_FILTER = True
 X_FRAME_OPTIONS = 'SAMEORIGIN'
 
 # CORS settings for HTTPS
-CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', default='', cast=Csv())
-if not CORS_ALLOWED_ORIGINS and config('DOMAIN', default=''):
-    CORS_ALLOWED_ORIGINS = [f"https://{config('DOMAIN')}"]
+cors_env = os.getenv('CORS_ALLOWED_ORIGINS', '')
+CORS_ALLOWED_ORIGINS = cors_env.split(',') if cors_env else []
+if not CORS_ALLOWED_ORIGINS and DOMAIN:
+    if DOMAIN.startswith('http'):
+        CORS_ALLOWED_ORIGINS = [DOMAIN]
+    else:
+        CORS_ALLOWED_ORIGINS = [f"https://{DOMAIN}"]
+
+# CSRF Trusted Origins
+CSRF_TRUSTED_ORIGINS = [origin for origin in CORS_ALLOWED_ORIGINS]
 
 # Allow credentials for CORS (for authenticated requests)
 CORS_ALLOW_CREDENTIALS = True

@@ -849,6 +849,18 @@ class TelegramClientManager:
         if account.id in self._clients:
             await self.stop_client(account.id)
 
+        # Ensure any stale temporary sessions are logged out
+        if account.pending_session_string:
+            try:
+                stale_client = TelegramClient(StringSession(account.pending_session_string), account.api_id, account.api_hash)
+                await stale_client.connect()
+                if not await stale_client.is_user_authorized():
+                    logger.info(f"Logging out stale temporary session for {account.id}")
+                    await stale_client.log_out()
+                await stale_client.disconnect()
+            except:
+                pass
+
         logger.info(f"Starting authentication for account {account.id} with phone {account.phone_number}")
 
         try:
@@ -1323,6 +1335,11 @@ class TelegramClientManager:
 
         def runner():
             async def run_qr():
+                # Stopping existing client if any to avoid multiple connections
+                if account.id in self._clients:
+                    logger.info(f"Stopping existing client for account {account.id} before new QR login")
+                    await self.stop_client(account.id)
+
                 client = TelegramClient(StringSession(), account.api_id, account.api_hash)
                 await client.connect()
                 try:
@@ -1343,7 +1360,17 @@ class TelegramClientManager:
                             entry['status'] = 'error'
                             entry['error'] = '2FA пароль не был введен вовремя.'
                             return
-                        await client.sign_in(password=entry['password'])
+                        try:
+                            await client.sign_in(password=entry['password'])
+                        except Exception as e:
+                            # Cleanup if sign in fails (e.g. wrong password)
+                            if "password" in str(e).lower():
+                                logger.info(f"QR Login: Wrong password for {account.id}. Logging out session.")
+                                try:
+                                    await client.log_out()
+                                except:
+                                    pass
+                            raise
 
                     if entry.get('cancel'):
                         return
@@ -1369,17 +1396,28 @@ class TelegramClientManager:
                         account.last_error = None
                         account.error_count = 0
                         await sync_to_async(account.save)()
+                        
+                        # Store client in manager if not already there
+                        self._clients[account.id] = client
                     else:
                         entry['status'] = 'pending'
                 except Exception as e:
                     entry['status'] = 'error'
                     entry['error'] = str(e)
                     logger.exception(f"Error creating QR login: {e}")
-                finally:
+                    # Destructive cleanup if auth failed
                     try:
-                        await client.disconnect()
-                    except Exception:
+                        if not await client.is_user_authorized():
+                            await client.log_out()
+                    except:
                         pass
+                finally:
+                    # Only disconnect if NOT authenticated (if authenticated, client is moved to self._clients)
+                    if entry.get('status') != 'authenticated':
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -1395,7 +1433,7 @@ class TelegramClientManager:
         account.save(update_fields=['status', 'last_error'])
 
         # Wait briefly for QR URL to be ready
-        entry['qr_ready_event'].wait(timeout=2)
+        entry['qr_ready_event'].wait(timeout=10)
 
         return {
             'success': True,
@@ -1498,3 +1536,91 @@ class TelegramClientManager:
         account_ids = list(self._clients.keys())
         for account_id in account_ids:
             await self.stop_client(account_id)
+
+    def check_authorization_sync(self, account: TelegramAccount) -> dict:
+        """Sync wrapper for checking authorization status"""
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(self.check_authorization(account), loop)
+        return future.result()
+
+    async def check_authorization(self, account: TelegramAccount) -> dict:
+        """
+        Check if the session is still valid by connecting a temporary client
+        """
+        if not account.session_string:
+            return {'success': False, 'error': 'No session string found'}
+
+        client = TelegramClient(
+            StringSession(account.session_string),
+            account.api_id,
+            account.api_hash
+        )
+        try:
+            await client.connect()
+            is_authorized = await client.is_user_authorized()
+            if is_authorized:
+                # Update account info if needed
+                me = await client.get_me()
+                account.telegram_user_id = me.id
+                account.username = me.username
+                account.status = TelegramAccount.AccountStatus.ACTIVE
+                account.last_error = None
+                await sync_to_async(account.save)()
+                return {'success': True, 'authorized': True}
+            else:
+                account.status = TelegramAccount.AccountStatus.ERROR
+                account.last_error = "Сессия недействительна (отозвана или истекла)"
+                await sync_to_async(account.save)()
+                return {'success': True, 'authorized': False}
+        except Exception as e:
+            logger.error(f"Error checking authorization for {account.id}: {e}")
+            return {'success': False, 'error': str(e)}
+        finally:
+            await client.disconnect()
+
+    def terminate_session_sync(self, account: TelegramAccount) -> dict:
+        """Sync wrapper for terminating session"""
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(self.terminate_session(account), loop)
+        return future.result()
+
+    async def terminate_session(self, account: TelegramAccount) -> dict:
+        """
+        Forcefully log out of both active and pending sessions and clear DB fields
+        """
+        # 1. Stop active client
+        if account.id in self._clients:
+            await self.stop_client(account.id)
+        
+        # 2. Logout of current session if it exists
+        if account.session_string:
+            try:
+                client = TelegramClient(StringSession(account.session_string), account.api_id, account.api_hash)
+                await client.connect()
+                await client.log_out()
+                await client.disconnect()
+            except:
+                pass
+            account.session_string = None
+
+        # 3. Logout of pending session if it exists
+        if account.pending_session_string:
+            try:
+                client = TelegramClient(StringSession(account.pending_session_string), account.api_id, account.api_hash)
+                await client.connect()
+                await client.log_out()
+                await client.disconnect()
+            except:
+                pass
+            account.pending_session_string = None
+
+        # 4. Clear all pending fields and set status to INACTIVE
+        account.pending_session_name = None
+        account.pending_phone_code_hash = None
+        account.pending_code_sent_at = None
+        account.pending_code_type = None
+        account.status = TelegramAccount.AccountStatus.INACTIVE
+        account.last_error = "Сессия аннулирована вручную (выход выполнен)"
+        await sync_to_async(account.save)()
+
+        return {'success': True}

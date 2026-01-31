@@ -486,5 +486,17 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   fetchChats();
+
+  // Polling for shared hosting (every 10 seconds)
+  setInterval(() => {
+    fetchChats();
+  }, 10000);
+
+  setInterval(() => {
+    if (currentChatId) {
+      fetchMessages();
+    }
+  }, 5000);
+
   setStatus("Готово");
 });

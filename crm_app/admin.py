@@ -17,7 +17,7 @@ class TelegramAccountAdmin(admin.ModelAdmin):
     list_filter = ['account_type', 'status', 'created_at']
     search_fields = ['name', 'phone_number', 'bot_username', 'username']
     readonly_fields = ['created_at', 'updated_at', 'last_activity']
-    actions = ['start_authentication', 'resend_code', 'request_manual_code', 'start_accounts', 'stop_accounts', 'restart_accounts']
+    actions = ['start_authentication', 'resend_code', 'request_manual_code', 'start_accounts', 'stop_accounts', 'restart_accounts', 'check_auth_status', 'terminate_sessions']
 
     fieldsets = (
         ('Основная информация', {
@@ -321,6 +321,82 @@ class TelegramAccountAdmin(admin.ModelAdmin):
 
     restart_accounts.short_description = "🔄 Перезапустить аккаунты"
 
+    def terminate_sessions(self, request, queryset):
+        """Force logout and clear all session data from Telegram and DB"""
+        from .services.telegram_client_manager import TelegramClientManager
+        success_count = 0
+        
+        manager = TelegramClientManager()
+        for account in queryset:
+            if account.account_type != TelegramAccount.AccountType.PERSONAL:
+                continue
+            
+            result = manager.terminate_session_sync(account)
+            if result.get('success'):
+                success_count += 1
+                self.message_user(request, f'💥 Сессия для "{account.name}" полностью аннулирована и удалена.')
+            else:
+                self.message_user(request, f'⚠️ Ошибка при удалении сессии "{account.name}": {result.get("error")}', level='error')
+        
+        self.message_user(request, f'Удалено {success_count} сессий.')
+
+    terminate_sessions.short_description = "💥 Аннулировать сессии (Полный выход)"
+
+    def check_auth_status(self, request, queryset):
+        """Check if Telegram session is still valid"""
+        from .services.telegram_client_manager import TelegramClientManager
+        success_count = 0
+        error_count = 0
+        
+        manager = TelegramClientManager()
+        for account in queryset:
+            if account.account_type != TelegramAccount.AccountType.PERSONAL:
+                continue
+                
+            result = manager.check_authorization_sync(account)
+            if result.get('success'):
+                if result.get('authorized'):
+                    success_count += 1
+                    self.message_user(request, f'✅ Аккаунт "{account.name}" авторизован.')
+                else:
+                    error_count += 1
+                    self.message_user(request, f'❌ Аккаунт "{account.name}" НЕ авторизован (сессия отозвана).', level='error')
+            else:
+                error_count += 1
+                self.message_user(request, f'⚠️ Ошибка проверки "{account.name}": {result.get("error")}', level='warning')
+        
+        self.message_user(request, f'Проверено {queryset.count()} аккаунтов. Активных: {success_count}.')
+
+    check_auth_status.short_description = "🔍 Проверить статус авторизации"
+
+    def changelist_view(self, request, extra_context=None):
+        """Perform automatic session check for active accounts (once every 15 min)"""
+        from django.utils import timezone
+        from .services.telegram_client_manager import TelegramClientManager
+        import threading
+
+        # Only check on the first page or when not filtering to avoid excessive load
+        if not request.GET or 'p' not in request.GET:
+            manager = TelegramClientManager()
+            # Find accounts that are ACTIVE but haven't been checked in 15 minutes
+            check_threshold = timezone.now() - timezone.timedelta(minutes=15)
+            # We don't have a 'last_checked_at' field in the model, so we use 'updated_at' as a proxy 
+            # or just do it for all ACTIVE ones in a separate thread to avoid blocking UI
+            accounts_to_check = TelegramAccount.objects.filter(
+                account_type=TelegramAccount.AccountType.PERSONAL,
+                status=TelegramAccount.AccountStatus.ACTIVE
+            )
+            
+            # Start background check if there are any accounts
+            if accounts_to_check.exists():
+                def background_check():
+                    for account in accounts_to_check:
+                        manager.check_authorization_sync(account)
+                
+                threading.Thread(target=background_check, daemon=True).start()
+
+        return super().changelist_view(request, extra_context=extra_context)
+
     def running_status(self, obj):
         """Показывает запущен ли клиент"""
         if obj.account_type != TelegramAccount.AccountType.PERSONAL:
@@ -332,7 +408,8 @@ class TelegramAccountAdmin(admin.ModelAdmin):
 
     def otp_link(self, obj):
         """Ссылка на верификацию OTP"""
-        if obj.account_type == TelegramAccount.AccountType.PERSONAL and obj.status == TelegramAccount.AccountStatus.AUTHENTICATING:
+        if obj.account_type == TelegramAccount.AccountType.PERSONAL:
+            # Always show button for personal accounts
             url = f'/admin/crm_app/telegramaccount/{obj.id}/verify_otp/'
             return format_html('<a href="{}" class="button" style="background: #ff6b35; color: white; padding: 3px 8px; border-radius: 3px;">Verify OTP</a>', url)
         return ''
@@ -349,6 +426,7 @@ class TelegramAccountAdmin(admin.ModelAdmin):
     def qr_link(self, obj):
         """Ссылка на QR login"""
         if obj.account_type == TelegramAccount.AccountType.PERSONAL:
+            # Always show button for personal accounts
             url = f'/admin/crm_app/telegramaccount/{obj.id}/qr_login/'
             return format_html('<a href="{}" class="button" style="background: #2d8cf0; color: white; padding: 3px 8px; border-radius: 3px;">QR Login</a>', url)
         return ''
@@ -378,7 +456,7 @@ class TelegramAccountAdmin(admin.ModelAdmin):
                 result = manager.verify_otp_sync(account, otp_code, password)
 
                 if result['success']:
-                    messages.success(request, f'Аккаунт "{account.name}" успешно аутентифицирован!')
+                    messages.success(request, f'Аккаунт "{account.name}" успешно аутентифицирован! Не забудьте активировать (запустить) аккаунт.')
                     return redirect('admin:crm_app_telegramaccount_change', account.id)
                 else:
                     error_msg = result.get("error", "Неизвестная ошибка")
@@ -437,7 +515,7 @@ class TelegramAccountAdmin(admin.ModelAdmin):
                 password = request.POST.get('password') or None
                 result = manager.check_qr_login_sync(account, password=password)
                 if result.get('success') and result.get('status') == 'authenticated':
-                    messages.success(request, f'Аккаунт "{account.name}" успешно аутентифицирован через QR!')
+                    messages.success(request, f'Аккаунт "{account.name}" успешно аутентифицирован через QR! Не забудьте активировать (запустить) аккаунт.')
                     return redirect('admin:crm_app_telegramaccount_change', account.id)
                 elif result.get('success') and result.get('status') == 'pending':
                     status_message = 'Ожидаем сканирование QR кода...'

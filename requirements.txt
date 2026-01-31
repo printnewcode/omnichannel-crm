@@ -1,37 +1,84 @@
-# Django и основные зависимости
-Django>=5.1,<6.0
-djangorestframework>=3.14.0
-django-cors-headers>=4.3.0
-python-decouple>=3.8
-
-# Django Channels для WebSockets
-channels>=4.0.0
-channels-redis>=4.1.0
-asgiref>=3.7.0
-daphne>=4.0.0  # ASGI сервер для WebSockets
-
-# Celery для асинхронных задач
-celery>=5.3.0
-redis>=5.0.0
-
-# MySQL драйвер
-#mysqlclient>=2.2.0
-# Альтернатива (если mysqlclient не установится):
-PyMySQL>=1.1.0
-
-# Telegram API клиенты
-telethon>=1.38.0  # Для личных аккаунтов (MTProto)
-qrcode>=7.4.2  # Для QR-кода (Telethon QR login)
-pillow>=10.0.0  # Для генерации QR PNG
-requests>=2.31.0  # Для Bot API
-aiohttp>=3.9.0  # Для асинхронных HTTP запросов
-
-# Утилиты
-python-dateutil>=2.8.2
-
-# Разработка (опционально)
-ipython>=8.12.0
-django-extensions>=3.2.0
-
-# Тестирование
-websocket-client>=1.6.0
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.3
+aiosignal==1.4.0
+aiosqlite==0.22.1
+amqp==5.3.1
+asgiref==3.11.0
+asttokens==3.0.1
+attrs==25.4.0
+autobahn==25.12.2
+Automat==25.4.16
+billiard==4.2.4
+cbor2==5.8.0
+celery==5.6.2
+certifi==2026.1.4
+cffi==2.0.0
+channels==4.3.2
+channels_redis==4.3.0
+charset-normalizer==3.4.4
+click==8.3.1
+click-didyoumean==0.3.1
+click-plugins==1.1.1.2
+click-repl==0.3.0
+colorama==0.4.6
+constantly==23.10.4
+cryptography==46.0.3
+daphne==4.2.1
+decorator==5.2.1
+Django==5.2.10
+django-cors-headers==4.9.0
+django-extensions==4.1
+djangorestframework==3.16.1
+executing==2.2.1
+frozenlist==1.8.0
+Hydrogram==0.2.0
+hyperlink==21.0.0
+idna==3.11
+Incremental==24.11.0
+ipython==9.9.0
+ipython_pygments_lexers==1.1.1
+jedi==0.19.2
+kombu==5.6.2
+matplotlib-inline==0.2.1
+msgpack==1.1.2
+multidict==6.7.0
+packaging==25.0
+parso==0.8.5
+pillow==12.1.0
+prompt_toolkit==3.0.52
+propcache==0.4.1
+pure_eval==0.2.3
+py-ubjson==0.16.1
+pyaes==1.6.1
+pyasn1==0.6.1
+pyasn1_modules==0.4.2
+pycparser==2.23
+Pygments==2.19.2
+PyMySQL==1.1.2
+pyOpenSSL==25.3.0
+PySocks==1.7.1
+python-dateutil==2.9.0.post0
+python-decouple==3.8
+python-dotenv==1.2.1
+qrcode==8.2
+redis==7.1.0
+requests==2.32.5
+rsa==4.9.1
+service-identity==24.2.0
+six==1.17.0
+sqlparse==0.5.5
+stack-data==0.6.3
+Telethon==1.42.0
+traitlets==5.14.3
+Twisted==25.5.0
+txaio==25.12.2
+typing_extensions==4.15.0
+tzdata==2025.3
+tzlocal==5.3.1
+ujson==5.11.0
+urllib3==2.6.3
+vine==5.1.0
+wcwidth==0.2.14
+websocket-client==1.9.0
+yarl==1.22.0
+zope.interface==8.2
