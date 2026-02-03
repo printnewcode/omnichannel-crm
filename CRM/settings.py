@@ -25,7 +25,7 @@ DEBUG = os.getenv('DEBUG', False)  #config('DEBUG', default=False, cast=bool)
 LOCAL = os.getenv('LOCAL', False)  #config('LOCAL', default=False, cast=bool)
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
 DOMAIN = os.getenv('DOMAIN', '')
-HOOK = os.getenv('HOOK', 'False').lower() == 'true'
+# HOOK = os.getenv('HOOK', 'False').lower() == 'true'
 
 # Application definition
 
@@ -100,15 +100,6 @@ else:
             "HOST": "127.0.0.1",
         }
     }
-
-
-# Для разработки можно использовать SQLite (закомментировать MySQL выше и раскомментировать ниже)
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.sqlite3',
-#         'NAME': BASE_DIR / 'db.sqlite3',
-#     }
-# }
 
 
 # Password validation

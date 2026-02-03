@@ -1,4 +1,4 @@
-# Omnichannel CRM System (Shared Hosting Edition)
+# Omnichannel CRM System
 
 Omnichannel CRM system for collecting messages from Telegram and responding from a single web interface. Adapted for deployment on Beget Shared Hosting.
 
@@ -18,6 +18,62 @@ Omnichannel CRM system for collecting messages from Telegram and responding from
 - ✅ Cron-based Telegram synchronization
 - ✅ Integration with existing bots via webhook
 - ✅ Media file downloads
+
+## Getting Started (Local Setup)
+
+### 1. Prerequisites
+- Python 3.12+
+- MySQL (optional, SQLite is used by default for local development)
+
+### 2. Installation
+1. Clone the repository:
+   ```bash
+   git clone <repository-url>
+   cd omnichannel-crm
+   ```
+
+2. Create and activate a virtual environment:
+   ```bash
+   python -m venv venv
+   # On Windows:
+   venv\Scripts\activate
+   # On Linux/macOS:
+   source venv/bin/activate
+   ```
+
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+### 3. Configuration
+1. Copy the example environment file:
+   ```bash
+   cp .env.example .env
+   ```
+2. Edit `.env` and set `LOCAL=True` for SQLite or configure MySQL credentials. Also set `SECRET_KEY`.
+
+### 4. Database & Admin
+1. Run migrations:
+   ```bash
+   python manage.py migrate
+   ```
+2. Create a superuser to access the admin panel:
+   ```bash
+   python manage.py createsuperuser
+   ```
+
+### 5. Running the Application
+1. Start the development server:
+   ```bash
+   python manage.py runserver
+   ```
+2. In a separate terminal, run the Telegram sync command:
+   ```bash
+   python manage.py sync_telegram
+   ```
+
+Access the admin panel at `http://127.0.0.1:8000/admin/`.
 
 ## Deployment on Beget Shared Hosting
 
@@ -55,8 +111,7 @@ Add these to **Cron** in Beget CP:
 3. Use the management command or UI to start authentication.
 
 ### Existing Bot Integration
-Set your existing bot's webhook to:
-`https://your-domain.com/api/webhook/bot/`
+In a process.
 
 ## License
 Apache-2.0

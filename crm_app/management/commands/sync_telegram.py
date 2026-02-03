@@ -2,6 +2,7 @@ import asyncio
 import logging
 from django.core.management.base import BaseCommand
 from django.utils import timezone
+from asgiref.sync import sync_to_async
 from crm_app.models import TelegramAccount
 from crm_app.services.telegram_client_manager import TelegramClientManager
 
@@ -26,14 +27,20 @@ class Command(BaseCommand):
             loop.close()
 
     async def sync_all_accounts(self):
-        accounts = TelegramAccount.objects.filter(
+        # Fetch accounts asynchronously
+        accounts_queryset = TelegramAccount.objects.filter(
             account_type=TelegramAccount.AccountType.PERSONAL,
             status=TelegramAccount.AccountStatus.ACTIVE
         )
         
-        if not accounts.exists():
+        # Check if any accounts exist and fetch them as a list
+        has_accounts = await sync_to_async(accounts_queryset.exists)()
+        if not has_accounts:
+            self.stdout.write(self.style.WARNING("No active personal accounts found for sync. Please activate them in the admin panel."))
             logger.info("No active personal accounts found for sync.")
             return
+
+        accounts = await sync_to_async(list)(accounts_queryset)
 
         manager = TelegramClientManager()
         
@@ -46,15 +53,24 @@ class Command(BaseCommand):
                     logger.error(f"Failed to start client for account {account.id}")
                     continue
                 
-                # Wait for some time to allow Telethon to process incoming updates
-                # In a real sync we might want to manually fetch missed messages,
-                # but with start_client, handlers are registered and will catch updates.
-                # However, since this is Cron, we should probably fetch the last N messages
-                # just in case updates were missed while the script was off.
+                # Fetch recent messages
                 await self.fetch_missed_messages(manager, account)
                 
-                # Disconnect after sync to release resources
-                await manager.stop_client(account.id)
+                # IMPORTANT: We DO NOT call stop_client here anymore.
+                # stop_client sets status to INACTIVE. By removing this call,
+                # the account status remains ACTIVE in the database.
+                # On Shared Hosting, the process will die anyway, which is fine.
+                # logger.info(f"Synchronization finished for {account.name}")
+                
+            except Exception as e:
+                logger.exception(f"Error syncing account {account.id}: {e}")
+                
+                # Double check that status is still ACTIVE after stop_client
+                # (stop_client usually doesn't change status to INACTIVE unless specified)
+                await sync_to_async(account.refresh_from_db)()
+                if account.status != TelegramAccount.AccountStatus.ACTIVE:
+                    account.status = TelegramAccount.AccountStatus.ACTIVE
+                    await sync_to_async(account.save)(update_fields=['status'])
                 
             except Exception as e:
                 logger.exception(f"Error syncing account {account.id}: {e}")
