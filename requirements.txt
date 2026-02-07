@@ -35,7 +35,7 @@ Hydrogram==0.2.0
 hyperlink==21.0.0
 idna==3.11
 Incremental==24.11.0
-ipython==9.9.0
+ipython==8.12.3
 ipython_pygments_lexers==1.1.1
 jedi==0.19.2
 kombu==5.6.2
