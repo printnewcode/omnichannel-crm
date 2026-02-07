@@ -40,6 +40,7 @@ class ChatSerializer(serializers.ModelSerializer):
     
     chat_type_display = serializers.CharField(source='get_chat_type_display', read_only=True)
     telegram_account_name = serializers.CharField(source='telegram_account.name', read_only=True)
+    telegram_account = TelegramAccountSerializer(read_only=True)
     last_message_preview = serializers.SerializerMethodField()
     
     class Meta:

@@ -168,6 +168,8 @@ a {
   padding: 10px 12px;
   border-radius: 12px;
   background: rgba(148, 163, 184, 0.15);
+  align-self: start;
+  word-break: break-word;
 }
 
 .message--outgoing {

@@ -1,0 +1,38 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+  <h1>Подтверждение OTP: {{ account.name }}</h1>
+
+  <p>Введите код, полученный в приложении Telegram.</p>
+
+  <form method="post">
+    {% csrf_token %}
+    <div style="margin-bottom: 12px;">
+      <label for="otp_code" style="display: block; margin-bottom: 4px;">OTP Код:</label>
+      <input type="text" id="otp_code" name="otp_code" required autofocus style="padding: 6px; font-size: 1.2em; width: 100%; max-width: 200px;" />
+    </div>
+
+    <div style="margin-bottom: 16px;">
+      <label for="password" style="display: block; margin-bottom: 4px;">Пароль 2FA (если установлен):</label>
+      <input type="password" id="password" name="password" style="padding: 6px; width: 100%; max-width: 300px;" />
+      <p class="help" style="margin-top: 4px; color: #666; font-size: 0.9em;">Если у вас включена двухэтапная аутентификация, введите пароль.</p>
+    </div>
+
+    <div>
+      <button type="submit" class="default" style="padding: 8px 20px; font-size: 1.1em; background: #1b8adb; color: white; border: none; border-radius: 4px; cursor: pointer;">Подтвердить</button>
+      <a href="{% url 'admin:crm_app_telegramaccount_change' account.id %}" style="margin-left: 12px;">Отмена</a>
+    </div>
+  </form>
+
+  <hr style="margin: 30px 0 20px;" />
+
+  <div class="help-section">
+    <h3>Не приходит код?</h3>
+    <ul>
+      <li>Убедитесь, что номер <strong>{{ account.phone_number }}</strong> указан верно.</li>
+      <li>Проверьте сообщения в официальном приложении Telegram на других устройствах.</li>
+      <li>Попробуйте подождать 2 минуты и нажать "Отправить код повторно" в меню действий аккаунта.</li>
+    </ul>
+  </div>
+{% endblock %}
