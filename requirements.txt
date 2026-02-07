@@ -6,7 +6,7 @@ amqp==5.3.1
 asgiref==3.11.0
 asttokens==3.0.1
 attrs==25.4.0
-autobahn==24.4.2
+autobahn
 Automat==25.4.16
 billiard==4.2.4
 cbor2==5.8.0
@@ -35,7 +35,7 @@ Hydrogram==0.2.0
 hyperlink==21.0.0
 idna==3.11
 Incremental==24.11.0
-ipython==8.12.3
+ipython
 ipython_pygments_lexers==1.1.1
 jedi==0.19.2
 kombu==5.6.2
@@ -71,7 +71,7 @@ stack-data==0.6.3
 Telethon==1.42.0
 traitlets==5.14.3
 Twisted==25.5.0
-txaio==23.1.1
+txaio
 typing_extensions==4.15.0
 tzdata==2025.3
 tzlocal==5.3.1
