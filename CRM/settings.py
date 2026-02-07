@@ -83,7 +83,7 @@ ASGI_APPLICATION = 'CRM.asgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 # MySQL 8.0+ для высоконагруженных записей
-if bool(LOCAL):
+if LOCAL.lower() == "true":
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
