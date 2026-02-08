@@ -42,6 +42,7 @@ class ChatSerializer(serializers.ModelSerializer):
     telegram_account_name = serializers.CharField(source='telegram_account.name', read_only=True)
     telegram_account = TelegramAccountSerializer(read_only=True)
     last_message_preview = serializers.SerializerMethodField()
+    last_message_data = serializers.SerializerMethodField()
     
     class Meta:
         model = Chat
@@ -51,7 +52,7 @@ class ChatSerializer(serializers.ModelSerializer):
             'first_name', 'last_name',
             'message_count', 'unread_count',
             'created_at', 'updated_at', 'last_message_at',
-            'last_message_preview', 'metadata'
+            'last_message_preview', 'last_message_data', 'metadata'
         ]
         read_only_fields = [
             'message_count', 'unread_count', 'created_at', 'updated_at', 'last_message_at'
@@ -63,6 +64,16 @@ class ChatSerializer(serializers.ModelSerializer):
         if last_message:
             text = last_message.text or last_message.media_caption or '[Медиа]'
             return text[:100]
+        return None
+
+    def get_last_message_data(self, obj):
+        """Получить дату и другие данные последнего сообщения"""
+        last_message = obj.messages.first()
+        if last_message:
+            return {
+                'telegram_date': last_message.telegram_date,
+                'is_outgoing': last_message.is_outgoing
+            }
         return None
 
 

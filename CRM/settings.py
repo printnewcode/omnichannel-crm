@@ -291,3 +291,7 @@ CSRF_TRUSTED_ORIGINS = [origin for origin in CORS_ALLOWED_ORIGINS]
 
 # Allow credentials for CORS (for authenticated requests)
 CORS_ALLOW_CREDENTIALS = True
+
+# Increase limits for large data uploads (fixes issues with many chats/messages in Admin)
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 10000
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10MB

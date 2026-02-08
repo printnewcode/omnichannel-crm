@@ -225,6 +225,10 @@ class HealthMonitor:
         await self.client_manager.start_all_active()
         logger.info("Force restart completed")
 
+    async def wait_for_all_catchups(self):
+        """Ожидание завершения всех кэшапов (синхронизации истории)"""
+        await self.client_manager.wait_for_catchups()
+
     async def get_system_status(self) -> Dict:
         """Получение статуса системы"""
         try:

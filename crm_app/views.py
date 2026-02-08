@@ -440,6 +440,14 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
     @action(detail=True, methods=['post'])
+    def mark_as_read(self, request, pk=None):
+        """Сбросить счетчик непрочитанных сообщений"""
+        chat = self.get_object()
+        chat.unread_count = 0
+        chat.save(update_fields=['unread_count'])
+        return Response({'status': 'success'}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
     def send_message(self, request, pk=None):
         """Отправить новое сообщение в чат"""
         chat = self.get_object()
@@ -539,6 +547,12 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
     
     def get_queryset_by_chat(self, chat_id):
         """Получить сообщения конкретного чата"""
+        # Если администратор - возвращаем без проверок назначения
+        if self.request.user.is_staff or self.request.user.is_superuser:
+             return Message.objects.filter(chat_id=chat_id).select_related(
+                'chat', 'chat__telegram_account', 'reply_to_message'
+            ).order_by('-telegram_date')
+
         # Проверка, что чат назначен оператору
         try:
             operator = Operator.objects.get(user=self.request.user, is_active=True)
@@ -957,5 +971,33 @@ class FileUploadView(APIView):
             logger.exception(f"Error uploading file: {e}")
             return Response(
                 {'error': 'File upload failed'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class SyncMessagesView(APIView):
+    """
+    Эндпоинт для запуска синхронизации сообщений (Polling)
+    Работает в фоновом потоке, чтобы не блокировать веб-запрос
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        try:
+            from .services.telegram_client_manager import TelegramClientManager
+            manager = TelegramClientManager()
+            
+            logger.info(f"SyncMessagesView: Triggering sync for user {request.user.id}")
+            # Запускаем синхронизацию всех активных аккаунтов в фоновом managed loop
+            manager.sync_all_active_sync()
+            
+            return Response({
+                'status': 'sync_triggered',
+                'timestamp': timezone.now().isoformat()
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception(f"Error in SyncMessagesView: {e}")
+            return Response(
+                {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )

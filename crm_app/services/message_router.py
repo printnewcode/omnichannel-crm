@@ -97,7 +97,8 @@ class MessageRouter:
                     account_id=account.id,
                     chat_id=chat.telegram_id,
                     text=text,
-                    reply_to_message_id=message.telegram_id
+                    reply_to_message_id=message.telegram_id,
+                    media_path=media_path
                 )
             elif account.account_type == TelegramAccount.AccountType.BOT:
                 # Отправка через Bot API (создаем event loop для bot api)
@@ -369,7 +370,8 @@ class MessageRouter:
                 return self.client_manager.send_message_sync(
                     account_id=account.id,
                     chat_id=chat.telegram_id,
-                    text=text
+                    text=text,
+                    media_path=media_path
                 )
             elif account.account_type == TelegramAccount.AccountType.BOT:
                 # Отправка через Bot API (создаем event loop для bot api)

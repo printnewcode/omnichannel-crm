@@ -1,114 +1,127 @@
 {% load static %}
 <!doctype html>
 <html lang="ru">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Omnichannel CRM</title>
-    <link rel="stylesheet" href="{% static 'frontend/style.css' %}" />
-  </head>
-  <body>
-    {% csrf_token %}
-    <header class="nav">
-      <div class="container nav__content">
-        <div class="logo">Omnichannel CRM</div>
-        <div class="nav__actions">
-          {% if request.user.is_authenticated %}
-          <span class="muted">Вы вошли как {{ request.user.username }}</span>
-          <a class="button button--ghost" href="{% url 'frontend-logout' %}">Выйти</a>
-          {% else %}
-          <a class="button button--ghost" href="#login">Войти</a>
-          {% endif %}
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Omnichannel CRM</title>
+  <link rel="stylesheet" href="{% static 'frontend/style.css' %}" />
+  <!-- Material Icons -->
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+  {% csrf_token %}
+
+  <div class="app-container">
+    {% if not request.user.is_authenticated %}
+    <div class="login-overlay">
+      <div class="login-card">
+        <h2>Вход</h2>
+        {% if messages %}
+        <div class="messages">
+          {% for message in messages %}
+          <div class="notice">{{ message }}</div>
+          {% endfor %}
+        </div>
+        {% endif %}
+        <form method="post" action="{% url 'frontend-login' %}" class="login-form">
+          {% csrf_token %}
+          <div class="input-group">
+            <input name="username" type="text" placeholder="Логин" required />
+          </div>
+          <div class="input-group">
+            <input name="password" type="password" placeholder="Пароль" required />
+          </div>
+          <button class="btn-primary" type="submit">Войти</button>
+        </form>
+        <div class="login-footer">
+          <a href="/admin/">Admin Panel</a>
         </div>
       </div>
-    </header>
+    </div>
+    {% else %}
 
-    <main>
-      <input type="hidden" name="csrfmiddlewaretoken" value="{% csrf_token %}">
-      <section class="section section--compact">
-        <div class="container">
-          <h1 class="page-title">Рабочий кабинет</h1>
-          <p class="lead">
-            Авторизуйтесь, выберите чат, просматривайте сообщения и отправляйте ответы.
-          </p>
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <!-- Menu button removed as requested -->
+        <i class="material-icons menu-icon">menu</i>
+        <!-- Theme Toggle -->
+        <i class="material-icons menu-icon" id="theme-toggle" onclick="toggleTheme()" title="Toggle Theme"
+          style="margin-left: auto; margin-right: 10px;">brightness_6</i>
+        <div class="search-bar">
+          <i class="material-icons search-icon">search</i>
+          <input type="text" placeholder="Search" id="chat-search">
         </div>
-      </section>
+      </div>
+      <div class="sidebar-tabs">
+        <div class="tab active">All</div>
+      </div>
+      <ul id="chat-list" class="chat-list">
+        <!-- Chat items injected by JS -->
+      </ul>
+    </aside>
 
-      <section class="section section--compact" id="login">
-        <div class="container">
-          <div class="panel">
-            <div class="panel__header">
-              <h2>Вход</h2>
-              {% if not request.user.is_authenticated %}
-              <a class="button button--secondary" href="/admin/">Войти</a>
-              {% endif %}
-            </div>
-            <div class="panel__body">
-              {% if messages %}
-              <div class="messages">
-                {% for message in messages %}
-                <div class="notice">{{ message }}</div>
-                {% endfor %}
-              </div>
-              {% endif %}
-
-              {% if not request.user.is_authenticated %}
-              <form method="post" action="{% url 'frontend-login' %}" class="login">
-                {% csrf_token %}
-                <label class="field">
-                  <span>Логин</span>
-                  <input name="username" type="text" placeholder="admin" required />
-                </label>
-                <label class="field">
-                  <span>Пароль</span>
-                  <input name="password" type="password" placeholder="••••••••" required />
-                </label>
-                <button class="button" type="submit">Войти</button>
-              </form>
-              {% else %}
-              <div class="hint">Вы уже авторизованы на сайте.</div>
-              {% endif %}
-
-            </div>
-          </div>
+    <!-- Main Chat Window -->
+    <main class="main-chat">
+      <div class="chat-header">
+        <div class="chat-header-info">
+          <div class="chat-header-title" id="active-chat">Select a chat</div>
+          <div class="chat-header-status" id="chat-status"></div>
         </div>
-      </section>
-
-      <section class="section section--compact">
-        <div class="container layout">
-          <div class="panel panel--list">
-            <div class="panel__header">
-              <h2>Чаты</h2>
-              <button class="button button--secondary" id="load-chats">Обновить</button>
-            </div>
-            <ul id="chat-list" class="list"></ul>
+        <div class="chat-header-actions" style="display: flex; align-items: center;">
+          <div id="message-search-container"
+            style="display: none; align-items: center; background: rgba(0,0,0,0.1); border-radius: 18px; padding: 4px 8px; margin-right: 10px;">
+            <input type="text" id="message-search-input" placeholder="Search..."
+              style="border: none; outline: none; background: transparent; color: var(--text-primary); width: 150px; font-size: 14px;">
+            <i class="material-icons" id="message-search-close"
+              style="font-size: 18px; cursor: pointer; color: #707579;">close</i>
           </div>
-          <div class="panel panel--messages">
-            <div class="panel__header">
-              <div>
-                <h2>Сообщения</h2>
-                <div class="muted" id="active-chat">Выберите чат</div>
-              </div>
-              <button class="button button--secondary" id="load-messages" disabled>Обновить</button>
-            </div>
-            <div id="error-box" class="error" style="display: none;"></div>
-            <div id="message-list" class="messages"></div>
-            <form id="send-form" class="send" autocomplete="off">
-              <input id="message-input" type="text" placeholder="Напишите сообщение..." />
-              <button class="button" type="submit" id="send-button" disabled>Отправить</button>
-            </form>
-          </div>
+          <i class="material-icons" id="message-search-btn" style="cursor: pointer;">search</i>
         </div>
-      </section>
+      </div>
+
+      <div class="chat-messages" id="message-list">
+        <!-- Messages injected by JS -->
+        <div class="empty-state">Select a chat to start messaging</div>
+      </div>
+
+      <!-- Upload Preview Area -->
+      <div id="upload-preview" class="upload-preview" style="display: none;">
+        <div class="upload-preview-content">
+          <i class="material-icons">description</i>
+          <span id="upload-filename">filename.jpg</span>
+          <i class="material-icons close-preview" id="clear-upload">close</i>
+        </div>
+      </div>
+
+      <form id="send-form" class="chat-input-area" autocomplete="off">
+        <input type="file" id="media-upload" style="display: none;" />
+        <button type="button" class="icon-btn" id="attach-btn"><i class="material-icons">attach_file</i></button>
+        <input id="message-input" type="text" placeholder="Message" />
+        <button type="button" class="icon-btn"><i class="material-icons">sentiment_satisfied_alt</i></button>
+        <button type="submit" class="icon-btn send-btn" id="send-button"><i class="material-icons">send</i></button>
+      </form>
     </main>
 
-    <footer class="footer">
-      <div class="container footer__content">
-        <span>© 2026 Omnichannel CRM</span>
-        <span id="status">Готово</span>
-      </div>
-    </footer>
+    {% endif %}
+  </div>
 
-    <script src="{% static 'frontend/app.js' %}"></script>
-  </body>
+  <!-- Notification Container -->
+  <div id="notification-container"></div>
+
+  <!-- Hidden standard django stuff if needed -->
+  {% csrf_token %}
+
+  <div id="media-viewer" class="media-viewer" style="display: none;">
+    <span class="media-viewer-close">&times;</span>
+    <img class="media-viewer-content" id="media-viewer-img">
+    <video class="media-viewer-content" id="media-viewer-video" controls style="display: none;"></video>
+  </div>
+  <script src="{% static 'frontend/app.js' %}"></script>
+</body>
+
 </html>

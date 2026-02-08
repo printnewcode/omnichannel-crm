@@ -41,6 +41,8 @@ class TelegramClientManager:
     _clients: Dict[int, TelegramClient] = {}
     _qr_logins: Dict[int, dict] = {}
     _tasks: Dict[int, asyncio.Task] = {}
+    _catchup_tasks: Dict[int, asyncio.Task] = {}
+    _last_sync_time: Dict[int, float] = {}  # Throttle for on-demand sync
     _loop: Optional[asyncio.AbstractEventLoop] = None
     _loop_thread: Optional[threading.Thread] = None
     
@@ -148,6 +150,10 @@ class TelegramClientManager:
                 self._create_message_handler(account),
                 events.NewMessage()
             )
+            client.add_event_handler(
+                self._create_edit_handler(account),
+                events.MessageEdited()
+            )
             
             # Сохранение клиента и запуск задачи прослушивания
             self._clients[account.id] = client
@@ -243,7 +249,8 @@ class TelegramClientManager:
         account_id: int,
         chat_id: int,
         text: str,
-        reply_to_message_id: Optional[int] = None
+        reply_to_message_id: Optional[int] = None,
+        media_path: Optional[str] = None
     ) -> Optional[int]:
         """
         Синхронная обертка для отправки сообщения через запущенный клиент
@@ -253,6 +260,7 @@ class TelegramClientManager:
             chat_id: Telegram Chat ID
             text: Текст сообщения
             reply_to_message_id: ID сообщения для ответа
+            media_path: Путь к медиа файлу (опционально)
 
         Returns:
             int: Message ID если успешно, None если ошибка
@@ -260,10 +268,10 @@ class TelegramClientManager:
         try:
             loop = self._ensure_background_loop()
             future = asyncio.run_coroutine_threadsafe(
-                self.send_message(account_id, chat_id, text, reply_to_message_id),
+                self.send_message(account_id, chat_id, text, reply_to_message_id, media_path),
                 loop
             )
-            return future.result(timeout=15)
+            return future.result(timeout=60) # Increased timeout for media
         except Exception as e:
             logger.exception(f"Error in send_message_sync: {e}")
             return None
@@ -273,7 +281,8 @@ class TelegramClientManager:
         account_id: int,
         chat_id: int,
         text: str,
-        reply_to_message_id: Optional[int] = None
+        reply_to_message_id: Optional[int] = None,
+        media_path: Optional[str] = None
     ) -> Optional[int]:
         """
         Отправить сообщение через Telethon клиент
@@ -283,21 +292,65 @@ class TelegramClientManager:
             chat_id: Telegram Chat ID
             text: Текст сообщения
             reply_to_message_id: ID сообщения для ответа
+            media_path: Путь к медиа файлу (опционально)
             
         Returns:
             int: Message ID если успешно, None если ошибка
         """
         if account_id not in self._clients:
-            logger.error(f"Client for account {account_id} is not running")
+            logger.error(f"Client for account {account_id} not running")
             return None
+            
+        client = self._clients[account_id]
         
         try:
-            client = self._clients[account_id]
-            sent_message = await client.send_message(
-                chat_id,
-                text,
-                reply_to=reply_to_message_id
-            )
+            if media_path:
+                from django.conf import settings
+                import os
+                
+                # DEBUG: Log path details
+                logger.info(f"DEBUG: Resolving media_path: '{media_path}'")
+                logger.info(f"DEBUG: MEDIA_ROOT: '{settings.MEDIA_ROOT}'")
+                try:
+                    logger.info(f"DEBUG: CWD: '{os.getcwd()}'")
+                except:
+                    pass
+
+                # Если путь относительный, добавляем MEDIA_ROOT
+                if not os.path.isabs(media_path):
+                    # Remove 'media/' prefix if present
+                    clean_path = media_path
+                    if media_path.startswith('media/') or media_path.startswith('/media/') or media_path.startswith('\\media\\'):
+                         clean_path = media_path.replace('media/', '', 1).replace('\\media\\', '', 1).lstrip('/\\')
+                         
+                    full_media_path = os.path.join(settings.MEDIA_ROOT, clean_path)
+                else:
+                    full_media_path = media_path
+                
+                logger.info(f"DEBUG: Final full_media_path: '{full_media_path}'")
+                    
+                if not os.path.exists(full_media_path):
+                    logger.error(f"Media file not found at: {full_media_path}")
+                    # Try one more fallback: relative to CWD
+                    fallback_path = os.path.abspath(media_path)
+                    logger.info(f"DEBUG: Trying fallback path: '{fallback_path}'")
+                    if os.path.exists(fallback_path):
+                        full_media_path = fallback_path
+                    else:
+                        return None
+                
+                sent_message = await client.send_file(
+                    chat_id,
+                    full_media_path,
+                    caption=text or None,
+                    reply_to=reply_to_message_id
+                )
+            else:
+                sent_message = await client.send_message(
+                    chat_id,
+                    text,
+                    reply_to=reply_to_message_id
+                )
             
             # Обновление последней активности
             try:
@@ -313,7 +366,7 @@ class TelegramClientManager:
             logger.warning(f"FloodWait when sending message: {e.seconds} seconds")
             # Можно добавить retry с задержкой
             await asyncio.sleep(e.seconds)
-            return await self.send_message(account_id, chat_id, text, reply_to_message_id)
+            return await self.send_message(account_id, chat_id, text, reply_to_message_id, media_path)
         except RPCError as e:
             logger.error(
                 "Telegram RPC error while sending message: %s (code=%s, value=%s)",
@@ -336,6 +389,10 @@ class TelegramClientManager:
             from channels.db import database_sync_to_async
 
             message = event.message
+
+            # Добавлено: Собираем только из личных чатов (Private chats)
+            if not message.is_private:
+                return
 
             try:
                 # Получение чата и отправителя
@@ -385,7 +442,7 @@ class TelegramClientManager:
                 chat, chat_created = await get_or_create_chat()
 
                 # Определение типа сообщения и медиа
-                message_type = self._get_message_type(message)
+                message_type = self._get_message_type(message) or 'text'
                 media_file_id = self._get_media_file_id(message)
 
                 logger.info(f"Processing message {message.id}: type={message_type}, has_media={bool(message.media)}, photo={bool(getattr(message, 'photo', None))}, video={bool(getattr(message, 'video', None))}")
@@ -544,7 +601,8 @@ class TelegramClientManager:
             return 'location'
         if getattr(message, 'contact', None):
             return 'contact'
-            return 'text'
+            
+        return 'text'
     
     def _get_media_file_id(self, message) -> Optional[str]:
         """Telethon не предоставляет file_id как в Bot API"""
@@ -783,6 +841,17 @@ class TelegramClientManager:
             logger.info(f"Listening for updates on account {account.id}")
             # Клиент будет прослушивать обновления автоматически
             # Эта задача просто держит соединение активным
+            
+            # Catch up on missed messages
+            try:
+                # Store catchup task separately so we can wait for it
+                self._catchup_tasks[account.id] = asyncio.create_task(self._catch_up_history(client, account, force=True))
+                await self._catchup_tasks[account.id]
+            except Exception as e:
+                 logger.error(f"Failed to catch up history for {account.id}: {e}")
+            finally:
+                self._catchup_tasks.pop(account.id, None)
+                 
             while True:
                 await asyncio.sleep(60)  # Проверка каждую минуту
                 if not client.is_connected():
@@ -1529,7 +1598,8 @@ class TelegramClientManager:
         
         accounts = await get_accounts()
         for account in accounts:
-            self.start_client_sync(account)
+            # Use async version inside async method to avoid deadlock and sync issues
+            await self.start_client(account)
     
     async def stop_all(self):
         """Остановить все клиенты"""
@@ -1537,8 +1607,38 @@ class TelegramClientManager:
         for account_id in account_ids:
             await self.stop_client(account_id)
 
+    def restart_all_clients_sync(self):
+        """Sync wrapper to restart all clients"""
+        loop = self._ensure_background_loop()
+        asyncio.run_coroutine_threadsafe(self.force_restart_all_sync(), loop)
+
+    async def force_restart_all_sync(self):
+        """Force restart all clients (async version)"""
+        await self.stop_all()
+        await asyncio.sleep(1)
+        await self.start_all_active()
+
+    async def wait_for_catchups(self):
+        """Wait for all running catchup tasks to finish"""
+        if not self._catchup_tasks:
+            return
+        
+        logger.info(f"Waiting for {len(self._catchup_tasks)} catchup tasks...")
+        await asyncio.gather(*self._catchup_tasks.values(), return_exceptions=True)
+        logger.info("All catchup tasks finished or failed")
+
+    def wait_for_catchups_sync(self, timeout=60):
+        """Sync wrapper to wait for catchups"""
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(self.wait_for_catchups(), loop)
+        try:
+            return future.result(timeout=timeout)
+        except Exception as e:
+            logger.error(f"Error waiting for catchups: {e}")
+            return False
+
     def check_authorization_sync(self, account: TelegramAccount) -> dict:
-        """Sync wrapper for checking authorization status"""
+        """Sync wrapper for check_authorization"""
         loop = self._ensure_background_loop()
         future = asyncio.run_coroutine_threadsafe(self.check_authorization(account), loop)
         return future.result()
@@ -1572,11 +1672,224 @@ class TelegramClientManager:
                 account.last_error = "Сессия недействительна (отозвана или истекла)"
                 await sync_to_async(account.save)()
                 return {'success': True, 'authorized': False}
-        except Exception as e:
-            logger.error(f"Error checking authorization for {account.id}: {e}")
-            return {'success': False, 'error': str(e)}
         finally:
             await client.disconnect()
+
+    def _create_edit_handler(self, account: TelegramAccount):
+        """Создать обработчик редактирования сообщений"""
+        
+        async def handle_edit(event):
+            """Обработка отредактированных сообщений"""
+            from ..models import Chat, Message as MessageModel
+            from channels.db import database_sync_to_async
+
+            message = event.message
+            
+            try:
+                # Получение чата
+                chat_entity = await event.get_chat()
+                
+                # Найти существующее сообщение в БД
+                @database_sync_to_async
+                def update_message():
+                    try:
+                        # Находим чат
+                        chat = Chat.objects.get(
+                            telegram_id=message.chat_id,
+                            telegram_account=account
+                        )
+                        
+                        # Находим сообщение
+                        msg_obj = MessageModel.objects.get(
+                            telegram_id=message.id,
+                            chat=chat
+                        )
+                        
+                        # Обновляем текст
+                        msg_obj.text = message.message
+                        msg_obj.save(update_fields=['text'])
+                        return msg_obj
+                    except (Chat.DoesNotExist, MessageModel.DoesNotExist):
+                        return None
+
+                updated_msg = await update_message()
+                
+                if updated_msg:
+                    logger.info(f"Message {message.id} edited")
+                    # (Optional) Notify websocket about edit
+            except Exception as e:
+                logger.exception(f"Error handling edited message: {e}")
+
+        return handle_edit
+
+    async def _catch_up_history(self, client: TelegramClient, account_or_id, force=False):
+        """
+        Загрузить пропущенные сообщения (история пока клиент был офлайн)
+        """
+        from ..models import Chat, Message as MessageModel, TelegramAccount
+        from channels.db import database_sync_to_async
+        from asgiref.sync import sync_to_async
+        from django.db.models import Max
+        import logging
+        from django.utils import timezone
+        
+        # Resolve account and its ID safely
+        if isinstance(account_or_id, int):
+            account_id = account_or_id
+            account = await sync_to_async(TelegramAccount.objects.get)(id=account_id)
+        else:
+            account = account_or_id
+            account_id = account.id
+
+        logger = logging.getLogger(__name__)
+        logger.info(f"Starting history catch-up for account {account_id}")
+
+        try:
+            # Получаем диалоги (последние 100, чтобы покрыть большинство активных переписок)
+            logger.debug(f"Fetching dialogs for account {account_id}...")
+            dialogs = await client.get_dialogs(limit=100)
+            logger.info(f"Found {len(dialogs)} dialogs for account {account_id}")
+            
+            for dialog in dialogs:
+                # Добавлено: Собираем только из личных чатов (User dialogs)
+                # Note: We might want to support groups later, but for now stick to users as requested
+                if not dialog.is_user:
+                    continue
+                    
+                try:
+                    chat_entity = dialog.entity
+                    chat_id = chat_entity.id
+                    safe_title = dialog.title.encode('ascii', 'replace').decode('ascii') if dialog.title else "Unknown"
+                    logger.debug(f"Processing dialog: {safe_title} (ID: {chat_id})")
+                    
+                    # Находим или создаем чат в БД
+                    @database_sync_to_async
+                    def get_or_create_chat():
+                        try:
+                            username = getattr(chat_entity, 'username', None)
+                            chat_obj, created = Chat.objects.get_or_create(
+                                telegram_id=chat_id,
+                                telegram_account=account,
+                                defaults={
+                                    'chat_type': 'private' if dialog.is_user else 'group' if dialog.is_group else 'channel',
+                                    'title': dialog.title or "Unknown",
+                                    'username': username
+                                }
+                            )
+                            # Update title if changed
+                            if not created and dialog.title and chat_obj.title != dialog.title:
+                                chat_obj.title = dialog.title
+                                chat_obj.save(update_fields=['title'])
+                                
+                            last_msg = MessageModel.objects.filter(chat=chat_obj).order_by('-telegram_date').first()
+                            last_msg_date = last_msg.telegram_date if last_msg else None
+                            return chat_obj, last_msg_date
+                        except Exception as e:
+                            logger.error(f"Error getting/creating chat {chat_id}: {e}")
+                            return None, None
+
+                    chat_obj, last_db_date = await get_or_create_chat()
+                    
+                    if not chat_obj:
+                        continue
+
+                    # Optimization: Get last message ID from DB
+                    @database_sync_to_async
+                    def get_last_db_msg_id():
+                        last_m = MessageModel.objects.filter(chat=chat_obj).order_by('-telegram_id').first()
+                        return last_m.telegram_id if last_m else None
+                    
+                    last_db_id = await get_last_db_msg_id()
+                    
+                    # If dialog.message.id matches what we have, nothing new here
+                    if not force and dialog.message and last_db_id == dialog.message.id:
+                        # logger.debug(f"Chat {chat_id} is up to date (last ID {last_db_id}), skipping messages fetch.")
+                        continue
+                    
+                    # Fetching logic: Get latest 20 messages for this chat.
+                    # Since we poll every 7s, limit=20 is more than enough coverage and faster.
+                    logger.debug(f"Fetching last 20 messages for chat {chat_id} (reason: last_db_id={last_db_id} vs tg_id={dialog.message.id if dialog.message else 'None'})...")
+                    history = await client.get_messages(chat_entity, limit=20)
+                    
+                    logger.debug(f"Telethon returned {len(history)} messages for chat {chat_id}")
+                    
+                    new_messages_count = 0
+                    for msg in history:
+                        if not msg.message and not msg.media:
+                            continue
+
+                        @database_sync_to_async
+                        def save_msg(message_data):
+                            from django.db import IntegrityError
+                            try:
+                                # Quick check if exists
+                                if MessageModel.objects.filter(telegram_id=message_data.id, chat=chat_obj).exists():
+                                    return None
+                                    
+                                # Convert date
+                                msg_date = message_data.date
+                                if msg_date and not msg_date.tzinfo:
+                                    msg_date = timezone.make_aware(msg_date)
+                                
+                                # Skip if older than last_db_date
+                                if last_db_date and msg_date < last_db_date.replace(microsecond=0):
+                                    return None
+
+                                # Use system method for type determination
+                                msg_type = self._get_message_type(message_data) or 'text'
+                                
+                                logger.debug(f"Eval message {message_data.id}: date={msg_date}, type={msg_type}, out={message_data.out}")
+
+                                # Create and save
+                                message_obj = MessageModel.objects.create(
+                                    chat=chat_obj,
+                                    telegram_id=message_data.id,
+                                    text=message_data.message or "",
+                                    is_outgoing=message_data.out,
+                                    telegram_date=msg_date,
+                                    message_type=msg_type,
+                                    from_user_id=message_data.sender_id,
+                                    from_user_name=getattr(dialog, 'title', 'Unknown'), # Fallback
+                                    status=MessageModel.MessageStatus.RECEIVED,
+                                    media_caption=getattr(message_data, 'message', None) if msg_type != 'text' else None
+                                )
+                                logger.info(f"Saved NEW message {message_data.id} in chat {chat_id} during sync")
+                                return message_obj
+                            except Exception as e:
+                                logger.error(f"Error saving message {message_data.id}: {e}")
+                                return None
+
+                        message_obj = await save_msg(msg)
+                        if message_obj:
+                            new_messages_count += 1
+                            # Optional: Update chat stats and notify WS
+                            # (Mirroring handle_message logic for consistency)
+                            try:
+                                @database_sync_to_async
+                                def update_stats():
+                                    chat_obj.message_count += 1
+                                    chat_obj.last_message_at = message_obj.telegram_date
+                                    if not message_obj.is_outgoing:
+                                        chat_obj.unread_count += 1
+                                    chat_obj.save(update_fields=['message_count', 'last_message_at', 'unread_count'])
+                                await update_stats()
+                            except: pass
+
+                    if new_messages_count > 0:
+                        safe_title = chat_obj.title.encode('ascii', 'replace').decode('ascii') if chat_obj.title else "Unknown"
+                        logger.info(f"Synced {new_messages_count} missed messages for chat {safe_title}")
+                    else:
+                        logger.debug(f"No new messages for chat {chat_id}")
+                        
+                except Exception as e:
+                    safe_title = getattr(dialog, 'title', 'Unknown').encode('ascii', 'replace').decode('ascii')
+                    logger.error(f"Error syncing chat {safe_title}: {e}")
+                    continue
+                    
+            logger.info(f"History catch-up completed for account {account.id}")
+            
+        except Exception as e:
+            logger.exception(f"Global error in history catch-up: {e}")
 
     def terminate_session_sync(self, account: TelegramAccount) -> dict:
         """Sync wrapper for terminating session"""
@@ -1624,3 +1937,80 @@ class TelegramClientManager:
         await sync_to_async(account.save)()
 
         return {'success': True}
+    def sync_all_active_sync(self):
+        """Sync wrapper for sync_all_active"""
+        loop = self._ensure_background_loop()
+        asyncio.run_coroutine_threadsafe(self.sync_all_active(), loop)
+
+    async def sync_all_active(self):
+        """Trigger sync for all active and running accounts"""
+        from ..models import TelegramAccount
+        from asgiref.sync import sync_to_async
+        
+        # Get all accounts that SHOULD be running
+        @sync_to_async
+        def get_active_accounts():
+            return list(TelegramAccount.objects.filter(
+                account_type=TelegramAccount.AccountType.PERSONAL,
+                status=TelegramAccount.AccountStatus.ACTIVE
+            ))
+            
+        active_accounts = await get_active_accounts()
+        logger.info(f"Sync starting for {len(active_accounts)} active accounts")
+        
+        for account in active_accounts:
+            client = self._clients.get(account.id)
+            if not client or not client.is_connected():
+                logger.warning(f"Client for account {account.id} is NOT running. Attempting to restart...")
+                # Try to restart client in this process
+                await self.start_client(account)
+                client = self._clients.get(account.id)
+                
+            if client and client.is_connected():
+                logger.debug(f"Triggering sync for account {account.id}")
+                await self.sync_messages_for_account_id(client, account.id)
+            else:
+                logger.error(f"Failed to start/find active client for account {account.id}")
+
+    async def sync_messages_for_account_id(self, client: TelegramClient, account_id: int, force: bool = False):
+        """Wrapper for sync_messages_for_account using ID"""
+        from asgiref.sync import sync_to_async
+        account = await sync_to_async(TelegramAccount.objects.get)(id=account_id)
+        return await self.sync_messages_for_account(client, account, force)
+
+    async def sync_messages_for_account(self, client: TelegramClient, account: TelegramAccount, force: bool = False):
+        """
+        On-demand synchronization for a specific account with throttling.
+        
+        Args:
+            client: Active Telethon client
+            account: TelegramAccount model
+            force: Skip 30s throttling if True
+        """
+        now = time.time()
+        last_sync = self._last_sync_time.get(account.id, 0)
+        
+        # No throttling as requested by USER
+
+        # If a catchup is already running, wait for it instead of starting a new one
+        if account.id in self._catchup_tasks:
+            logger.info(f"Sync for account {account.id} already in progress, waiting...")
+            try:
+                await self._catchup_tasks[account.id]
+                return True
+            except Exception as e:
+                logger.error(f"Waiting for existing sync failed for {account.id}: {e}")
+                return False
+
+        logger.info(f"Triggering on-demand sync for account {account.id}")
+        self._last_sync_time[account.id] = now
+        
+        try:
+            self._catchup_tasks[account.id] = asyncio.create_task(self._catch_up_history(client, account, force=force))
+            await self._catchup_tasks[account.id]
+            return True
+        except Exception as e:
+            logger.error(f"On-demand sync failed for account {account.id}: {e}")
+            return False
+        finally:
+            self._catchup_tasks.pop(account.id, None)

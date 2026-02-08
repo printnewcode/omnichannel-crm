@@ -6,7 +6,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     TelegramAccountViewSet, ChatViewSet, MessageViewSet,
     BotWebhookView, HealthCheckView, SystemStatusView, SystemControlView,
-    FileUploadView
+    SyncMessagesView, FileUploadView
 )
 
 router = DefaultRouter()
@@ -25,6 +25,9 @@ urlpatterns = [
     path('api/health/', HealthCheckView.as_view(), name='health-check'),
     path('api/system/status/', SystemStatusView.as_view(), name='system-status'),
     path('api/system/control/', SystemControlView.as_view(), name='system-control'),
+
+    # File sync/polling
+    path('api/sync/', SyncMessagesView.as_view(), name='message-sync'),
 
     # File upload
     path('api/upload/', FileUploadView.as_view(), name='file-upload'),
