@@ -14,17 +14,12 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         self.stdout.write(self.style.SUCCESS('Starting Telegram synchronization...'))
         
-        # We need a fresh loop for this command
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
         try:
-            loop.run_until_complete(self.sync_all_accounts())
+            manager = TelegramClientManager()
+            manager.run_async_sync(self.sync_all_accounts())
             self.stdout.write(self.style.SUCCESS('Synchronization completed successfully.'))
         except Exception as e:
             self.stdout.write(self.style.ERROR(f'Synchronization failed: {e}'))
-        finally:
-            loop.close()
 
     async def sync_all_accounts(self):
         # Fetch accounts asynchronously

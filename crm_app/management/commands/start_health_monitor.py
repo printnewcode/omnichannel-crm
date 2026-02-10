@@ -51,7 +51,8 @@ class Command(BaseCommand):
             # Запуск в фоне
             self.stdout.write(self.style.SUCCESS('Мониторинг запущен в фоновом режиме'))
             try:
-                asyncio.run(monitor.start_monitoring())
+                from crm_app.services.telegram_client_manager import TelegramClientManager
+                TelegramClientManager().run_async_sync(monitor.start_monitoring())
             except KeyboardInterrupt:
                 self.stdout.write(self.style.WARNING('Мониторинг остановлен пользователем'))
             except Exception as e:
@@ -60,17 +61,17 @@ class Command(BaseCommand):
             # Запуск однократной проверки
             self.stdout.write(self.style.SUCCESS('Выполнение однократной проверки здоровья...'))
 
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
             try:
-                loop.run_until_complete(monitor._perform_health_checks())
+                from crm_app.services.telegram_client_manager import TelegramClientManager
+                manager = TelegramClientManager()
+                
+                manager.run_async_sync(monitor._perform_health_checks())
                 
                 # Дожидаемся завершения синхронизации истории (кэшапа)
                 self.stdout.write("Ожидание синхронизации сообщений (может занять время)...")
-                loop.run_until_complete(monitor.wait_for_all_catchups())
+                manager.run_async_sync(monitor.wait_for_all_catchups())
                 
-                status = loop.run_until_complete(monitor.get_system_status())
+                status = manager.run_async_sync(monitor.get_system_status())
 
                 self.stdout.write(self.style.SUCCESS('Проверка завершена'))
                 self.stdout.write(f"Статус системы: {status.get('status', 'unknown')}")

@@ -26,8 +26,8 @@ class CrmAppConfig(AppConfig):
             from crm_app.services.telegram_client_manager import TelegramClientManager
             manager = TelegramClientManager()
             try:
-                asyncio.run(manager.start_all_active())
-                logger.info("Telethon clients auto-started")
+                manager.start_all_active_sync()
+                logger.info("Telethon clients auto-started via persistent loop")
             except Exception as e:
                 logger.exception(f"Failed to auto-start Telethon clients: {e}")
 

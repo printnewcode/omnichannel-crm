@@ -20,12 +20,8 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING('Нет запущенных аккаунтов'))
             return
         
-        # Остановка всех аккаунтов
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
         try:
-            loop.run_until_complete(manager.stop_all())
+            manager.run_async_sync(manager.stop_all())
             self.stdout.write(
                 self.style.SUCCESS(
                     f'Успешно остановлено {len(running_accounts)} аккаунтов'
@@ -35,5 +31,3 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.ERROR(f'Ошибка при остановке аккаунтов: {e}')
             )
-        finally:
-            loop.close()

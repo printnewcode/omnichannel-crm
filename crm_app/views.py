@@ -164,10 +164,7 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
         # Запуск процесса авторизации
         manager = TelegramClientManager()
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(manager.authenticate_account(account))
-            loop.close()
+            result = manager.run_async_sync(manager.authenticate_account(account))
 
             if result['success']:
                 return Response(result, status=status.HTTP_200_OK)
@@ -201,10 +198,7 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
         # Верификация OTP
         manager = TelegramClientManager()
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(manager.verify_otp(account, otp_code, password))
-            loop.close()
+            result = manager.run_async_sync(manager.verify_otp(account, otp_code, password))
 
             if result['success']:
                 return Response(result, status=status.HTTP_200_OK)
@@ -278,10 +272,7 @@ class SystemStatusView(APIView):
         """Получение детального статуса системы"""
         try:
             monitor = HealthMonitor()
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            status_data = loop.run_until_complete(monitor.get_system_status())
-            loop.close()
+            status_data = TelegramClientManager().run_async_sync(monitor.get_system_status())
 
             return Response(status_data, status=status.HTTP_200_OK)
 
@@ -308,10 +299,7 @@ class SystemControlView(APIView):
         """Принудительный перезапуск всех клиентов"""
         try:
             monitor = HealthMonitor()
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(monitor.force_restart_all_clients())
-            loop.close()
+            TelegramClientManager().run_async_sync(monitor.force_restart_all_clients())
 
             return Response({
                 'status': 'restarted',

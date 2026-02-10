@@ -70,18 +70,37 @@ class TelegramClientManager:
     
     def _ensure_background_loop(self) -> asyncio.AbstractEventLoop:
         """Ensure a persistent background loop for long-lived clients."""
+        # Using a thread-safe check for the loop
         if self._loop and self._loop.is_running():
             return self._loop
 
-        self._loop = asyncio.new_event_loop()
+        # Use a threading lock to prevent multiple loops from starting
+        if not hasattr(self, '_loop_lock'):
+            self._loop_lock = threading.Lock()
+            
+        with self._loop_lock:
+            if self._loop and self._loop.is_running():
+                return self._loop
 
-        def runner(loop: asyncio.AbstractEventLoop):
-            asyncio.set_event_loop(loop)
-            loop.run_forever()
+            self._loop = asyncio.new_event_loop()
 
-        self._loop_thread = threading.Thread(target=runner, args=(self._loop,), daemon=True)
-        self._loop_thread.start()
+            def runner(loop: asyncio.AbstractEventLoop):
+                asyncio.set_event_loop(loop)
+                loop.run_forever()
+
+            self._loop_thread = threading.Thread(target=runner, args=(self._loop,), daemon=True, name="TelethonManagerLoop")
+            self._loop_thread.start()
+            
+            # Give the loop a moment to start
+            time.sleep(0.1)
+            
         return self._loop
+
+    def run_async_sync(self, coro):
+        """Run a coroutine in the background loop and wait for result"""
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result()
     
     def start_client_sync(self, account: TelegramAccount) -> bool:
         """Sync wrapper for start_client"""
@@ -690,16 +709,11 @@ class TelegramClientManager:
 
     def _download_in_background(self, message) -> Optional[str]:
         """Выполнить скачивание в фоне"""
-        import asyncio
-
-        # Создаем новый event loop для этого потока
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
         try:
-            return loop.run_until_complete(self._download_with_fresh_client(message))
-        finally:
-            loop.close()
+            return self.run_async_sync(self._download_with_fresh_client(message))
+        except Exception as e:
+            logger.error(f"Error in background download: {e}")
+            return None
 
     async def _download_with_fresh_client(self, message) -> Optional[str]:
         """Скачать медиа используя новый клиент"""
@@ -872,13 +886,7 @@ class TelegramClientManager:
     
     def authenticate_account_sync(self, account: TelegramAccount) -> dict:
         """Sync wrapper for authenticate_account"""
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(self.authenticate_account(account))
-        finally:
-            loop.close()
+        return self.run_async_sync(self.authenticate_account(account))
 
     async def authenticate_account(self, account: TelegramAccount) -> dict:
         """
@@ -1054,13 +1062,7 @@ class TelegramClientManager:
 
     def verify_otp_sync(self, account: TelegramAccount, otp_code: str, password: str = None) -> dict:
         """Sync wrapper for verify_otp"""
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(self.verify_otp(account, otp_code, password))
-        finally:
-            loop.close()
+        return self.run_async_sync(self.verify_otp(account, otp_code, password))
 
     async def verify_otp(self, account: TelegramAccount, otp_code: str, password: str = None) -> dict:
         """
@@ -1493,10 +1495,8 @@ class TelegramClientManager:
                         except Exception:
                             pass
 
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(run_qr())
-            loop.close()
+            close_old_connections()
+            self.run_async_sync(run_qr())
 
         thread = threading.Thread(target=runner, daemon=True)
         entry['thread'] = thread
@@ -2019,3 +2019,28 @@ class TelegramClientManager:
             return False
         finally:
             self._catchup_tasks.pop(account.id, None)
+
+    def start_all_active_sync(self):
+        """Sync wrapper for start_all_active"""
+        return self.run_async_sync(self.start_all_active())
+
+    async def start_all_active(self):
+        """Start all active accounts"""
+        from ..models import TelegramAccount
+        
+        # Get all active personal accounts
+        @database_sync_to_async
+        def get_active_accounts():
+            return list(TelegramAccount.objects.filter(
+                account_type=TelegramAccount.AccountType.PERSONAL,
+                status=TelegramAccount.AccountStatus.ACTIVE
+            ))
+            
+        active_accounts = await get_active_accounts()
+        logger.info(f"Auto-starting {len(active_accounts)} active accounts")
+        
+        for account in active_accounts:
+            try:
+                await self.start_client(account)
+            except Exception as e:
+                logger.error(f"Failed to auto-start account {account.id}: {e}")
