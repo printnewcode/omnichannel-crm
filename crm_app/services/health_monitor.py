@@ -5,7 +5,9 @@ import logging
 import asyncio
 from typing import Dict, List
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction, close_old_connections
+from asgiref.sync import sync_to_async
+from channels.db import database_sync_to_async
 from ..models import TelegramAccount, Chat, Message
 from .telegram_client_manager import TelegramClientManager
 
@@ -32,6 +34,7 @@ class HealthMonitor:
 
         while self._monitoring_active:
             try:
+                await database_sync_to_async(close_old_connections)()
                 await self._perform_health_checks()
             except Exception as e:
                 logger.exception(f"Error in health monitoring: {e}")
@@ -176,43 +179,33 @@ class HealthMonitor:
 
     async def _async_count(self, queryset):
         """Асинхронный подсчет"""
-        from django.db import connection
-        from asgiref.sync import sync_to_async
-
-        return await sync_to_async(queryset.count)()
+        return await database_sync_to_async(queryset.count)()
 
     async def _async_iterator(self, queryset):
         """Асинхронный итератор по queryset"""
-        from asgiref.sync import sync_to_async
-        from django.db import connection
-
         try:
             # Получаем все объекты синхронно, но оборачиваем в async
-            objects = await sync_to_async(list)(queryset)
+            objects = await database_sync_to_async(list)(queryset)
             for obj in objects:
                 yield obj
         except Exception as e:
             logger.error(f"Database query failed in _async_iterator: {e}")
             # Try to close and reopen connection
             try:
-                await sync_to_async(connection.close)()
-                logger.info("Database connection closed due to error")
+                await database_sync_to_async(close_old_connections)()
+                logger.info("Database connections refreshed due to error")
             except Exception as close_error:
-                logger.warning(f"Failed to close connection: {close_error}")
+                logger.warning(f"Failed to close connections: {close_error}")
             # Return empty iterator on error
             return
 
     async def _async_save(self, obj):
         """Асинхронное сохранение объекта"""
-        from asgiref.sync import sync_to_async
-
-        await sync_to_async(obj.save)()
+        await database_sync_to_async(obj.save)()
 
     async def _async_delete(self, queryset):
         """Асинхронное удаление"""
-        from asgiref.sync import sync_to_async
-
-        result = await sync_to_async(queryset.delete)()
+        result = await database_sync_to_async(queryset.delete)()
         return result[0] if result else 0
 
     # Методы для ручного управления

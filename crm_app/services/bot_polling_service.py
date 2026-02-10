@@ -8,7 +8,9 @@ from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 import aiohttp
 from django.conf import settings
+from django.db import close_old_connections
 from asgiref.sync import sync_to_async
+from channels.db import database_sync_to_async
 from ..models import TelegramAccount, Chat, Message
 
 logger = logging.getLogger(__name__)
@@ -72,10 +74,10 @@ class BotPollingService:
             chat_id = chat_data.get('id')
 
             # Get or create TelegramAccount for this bot
-            account = await sync_to_async(self.get_or_create_bot_account)()
+            account = await database_sync_to_async(self.get_or_create_bot_account)()
 
             # Get or create chat
-            chat, created = await sync_to_async(Chat.objects.get_or_create)(
+            chat, created = await database_sync_to_async(Chat.objects.get_or_create)(
                 telegram_id=chat_id,
                 telegram_account=account,
                 defaults={
@@ -88,7 +90,7 @@ class BotPollingService:
             )
 
             # Create message
-            message = await sync_to_async(Message.objects.create)(
+            message = await database_sync_to_async(Message.objects.create)(
                 telegram_id=message_data['message_id'],
                 chat=chat,
                 message_type=self.get_message_type(message_data),
@@ -205,6 +207,8 @@ class BotPollingService:
 
         while self.is_running:
             try:
+                # Ensure connection is fresh
+                await database_sync_to_async(close_old_connections)()
                 updates = await self.get_updates()
                 if updates and updates.get('ok') and updates.get('result'):
                     for update in updates['result']:
