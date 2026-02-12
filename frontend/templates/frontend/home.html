@@ -48,7 +48,7 @@
     <aside class="sidebar">
       <div class="sidebar-header">
         <!-- Menu button removed as requested -->
-        <i class="material-icons menu-icon">menu</i>
+        <!-- Menu button removed as requested -->
         <!-- Theme Toggle -->
         <i class="material-icons menu-icon" id="theme-toggle" onclick="toggleTheme()" title="Toggle Theme"
           style="margin-left: auto; margin-right: 10px;">brightness_6</i>
@@ -89,6 +89,12 @@
         <div class="empty-state">Select a chat to start messaging</div>
       </div>
 
+      <!-- Account Status Banner -->
+      <div id="account-status-banner" class="account-status-banner" style="display: none;">
+        <i class="material-icons">warning</i>
+        <span id="account-status-text">Account is disconnected. Some features may be limited.</span>
+      </div>
+
       <!-- Upload Preview Area -->
       <div id="upload-preview" class="upload-preview" style="display: none;">
         <div class="upload-preview-content">
@@ -102,7 +108,12 @@
         <input type="file" id="media-upload" style="display: none;" />
         <button type="button" class="icon-btn" id="attach-btn"><i class="material-icons">attach_file</i></button>
         <input id="message-input" type="text" placeholder="Message" />
-        <button type="button" class="icon-btn"><i class="material-icons">sentiment_satisfied_alt</i></button>
+        <div class="emoji-picker-container">
+          <button type="button" class="icon-btn" id="emoji-btn"><i class="material-icons">sentiment_satisfied_alt</i></button>
+          <div id="emoji-picker" class="emoji-picker" style="display: none;">
+            <!-- Emojis will be injected by JS -->
+          </div>
+        </div>
         <button type="submit" class="icon-btn send-btn" id="send-button"><i class="material-icons">send</i></button>
       </form>
     </main>

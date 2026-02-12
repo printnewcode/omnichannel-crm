@@ -467,12 +467,26 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
             telegram_message_id = router.send_message(chat, text, media_path)
 
             if telegram_message_id:
+                # Определение типа сообщения по расширению
+                msg_type = 'text'
+                if media_path:
+                    import os
+                    ext = os.path.splitext(media_path)[1].lower()
+                    if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
+                        msg_type = 'photo'
+                    elif ext in ['.mp4', '.avi', '.mov', '.mkv']:
+                        msg_type = 'video'
+                    elif ext in ['.mp3', '.wav', '.ogg', '.m4a']:
+                        msg_type = 'audio'
+                    else:
+                        msg_type = 'document'
+
                 # Создание записи об отправленном сообщении
                 outgoing_message = router.create_outgoing_message(
                     chat=chat,
                     text=text,
                     telegram_message_id=telegram_message_id,
-                    message_type='text' if not media_path else 'photo',
+                    message_type=msg_type,
                     media_file_path=media_path
                 )
 
@@ -606,13 +620,27 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
             telegram_message_id = router.send_reply(message, text, media_path)
             
             if telegram_message_id:
+                # Определение типа сообщения по расширению
+                msg_type = 'text'
+                if media_path:
+                    import os
+                    ext = os.path.splitext(media_path)[1].lower()
+                    if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
+                        msg_type = 'photo'
+                    elif ext in ['.mp4', '.avi', '.mov', '.mkv']:
+                        msg_type = 'video'
+                    elif ext in ['.mp3', '.wav', '.ogg', '.m4a']:
+                        msg_type = 'audio'
+                    else:
+                        msg_type = 'document'
+
                 # Создание записи об отправленном сообщении
                 outgoing_message = router.create_outgoing_message(
                     chat=message.chat,
                     text=text,
                     telegram_message_id=telegram_message_id,
                     reply_to_message=message,
-                    message_type='text' if not media_path else 'photo',
+                    message_type=msg_type,
                     media_file_path=media_path
                 )
                 

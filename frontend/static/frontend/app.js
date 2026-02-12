@@ -156,6 +156,13 @@ const selectChat = (id, label) => {
   });
 
   if (window.fetchMessagesGlobal) window.fetchMessagesGlobal(true);
+
+  // Clear unread immediately on client side
+  const chatItem = document.querySelector(`.chat-item[data-chat-id="${id}"]`);
+  if (chatItem) {
+    const unread = chatItem.querySelector('.unread-indicator');
+    if (unread) unread.remove();
+  }
 };
 
 const getInitials = (name) => {
@@ -267,16 +274,66 @@ window.onclick = (event) => {
 }
 
 let renderedMessageIds = new Set();
+let lastDateString = null;
+
+const formatDateHeader = (date) => {
+  const options = { month: 'long', day: 'numeric' };
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+
+  if (date.toDateString() === today.toDateString()) return 'Today';
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  if (date.getFullYear() !== today.getFullYear()) options.year = 'numeric';
+
+  return date.toLocaleDateString(undefined, options);
+};
+
+// Sticky date logic
+const updateStickyDate = () => {
+  const messageList = document.getElementById("message-list");
+  const stickyDateHeader = document.getElementById("sticky-date-header");
+  if (!messageList || !stickyDateHeader) return;
+
+  const dividers = Array.from(messageList.querySelectorAll('.date-divider'));
+  let currentDivider = null;
+
+  for (const divider of dividers) {
+    if (divider.offsetTop <= messageList.scrollTop + 80) {
+      currentDivider = divider;
+    } else {
+      break;
+    }
+  }
+
+  if (currentDivider) {
+    stickyDateHeader.textContent = currentDivider.textContent;
+    stickyDateHeader.style.display = 'block';
+  } else {
+    stickyDateHeader.style.display = 'none';
+  }
+};
 
 const renderMessages = (messages, forceScroll = false) => {
   const messageList = document.getElementById("message-list");
   if (!messageList) return;
+
+  // Ensure sticky header exists
+  let stickyDateHeader = document.getElementById("sticky-date-header");
+  if (!stickyDateHeader) {
+    stickyDateHeader = document.createElement("div");
+    stickyDateHeader.id = "sticky-date-header";
+    stickyDateHeader.className = "sticky-date";
+    messageList.parentElement.insertBefore(stickyDateHeader, messageList);
+    messageList.addEventListener('scroll', updateStickyDate);
+  }
 
   const isAtBottom = messageList.scrollHeight - messageList.scrollTop <= messageList.clientHeight + 150;
 
   if (forceScroll) {
     messageList.innerHTML = "";
     renderedMessageIds.clear();
+    lastDateString = null;
   }
 
   if (messages.length === 0) {
@@ -308,6 +365,18 @@ const renderMessages = (messages, forceScroll = false) => {
   const sorted = filtered.sort((a, b) => new Date(a.telegram_date) - new Date(b.telegram_date));
 
   sorted.forEach((msg) => {
+    // Check for date change
+    const msgDate = new Date(msg.telegram_date);
+    const dateStr = msgDate.toDateString();
+
+    if (dateStr !== lastDateString) {
+      const divider = document.createElement("div");
+      divider.className = "date-divider";
+      divider.textContent = formatDateHeader(msgDate);
+      messageList.appendChild(divider);
+      lastDateString = dateStr;
+    }
+
     // If message already rendered, just update status if it changed
     if (renderedMessageIds.has(msg.id)) {
       const existing = document.querySelector(`.message[data-msg-id="${msg.id}"]`);
@@ -416,9 +485,17 @@ const handleFileUpload = async (file) => {
     // Show preview
     const preview = document.getElementById("upload-preview");
     const filename = document.getElementById("upload-filename");
+    const previewIcon = preview?.querySelector('.material-icons:first-child');
+
     if (preview && filename) {
       filename.textContent = data.file_name;
       preview.style.display = "flex";
+
+      if (previewIcon) {
+        const ext = data.file_name.split('.').pop().toLowerCase();
+        const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+        previewIcon.textContent = imageExts.includes(ext) ? 'image' : 'description';
+      }
     }
     setStatus("");
   } catch (e) {
@@ -449,7 +526,17 @@ document.addEventListener("DOMContentLoaded", () => {
         // Safe check for telegram_account
         if (c.telegram_account && c.telegram_account.status !== 'active') inactive.push(c.telegram_account.name);
       });
-      if (inactive.length > 0) setError(`Inactive accounts: ${inactive.join(', ')}`);
+
+      const banner = document.getElementById("account-status-banner");
+      const bannerText = document.getElementById("account-status-text");
+      if (banner && bannerText) {
+        if (inactive.length > 0) {
+          bannerText.textContent = `Accounts disconnected: ${inactive.join(', ')}. Please contact admin.`;
+          banner.style.display = "flex";
+        } else {
+          banner.style.display = "none";
+        }
+      }
 
       // Select first chat if none selected
       if (chats.length > 0 && !currentChatId) {
@@ -584,6 +671,42 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }, 7000);
   };
+
+  // Emoji Picker Logic
+  const emojiBtn = document.getElementById("emoji-btn");
+  const emojiPicker = document.getElementById("emoji-picker");
+  const messageInput = document.getElementById("message-input");
+
+  const commonEmojis = ['😀', '😃', '😄', '😁', '😅', '😂', '🤣', '😊', '😇', '🙂', '🙃', '😉', '😌', '😍', '🥰', '😘', '😗', '😙', '😚', '😋', '😛', '😝', '😜', '🤪', '🤨', '🧐', '🤓', '😎', '🤩', '🥳', '😏', '😒', '😞', '😔', '😟', '😕', '🙁', '☹️', '😣', '😖', '😫', '😩', '🥺', '😢', '😭', '😤', '😠', '😡', '🤬', '🤯', '😳', '🥵', '🥶', '😱', '😨', '😰', '😥', '😓', '🤗', '🤔', '🤭', '🤫', '🤥', '😶', '😐', '😑', '😬', '🙄', '😯', '😧', '😨', '😰', '🤤', '😪', '😵', '🤐', '🥴', '🤢', '🤮', '🤧', '😷', '🤒', '🤕', '🤑', '🤠', '😈', '👿', '👹', '👺', '🤡', '👻', '💀', '☠️', '👽', '👾', '🤖', '🎃', '😺', '😸', '😹', '😻', '😼', '😽', '🙀', '😿', '😾'];
+
+  if (emojiBtn && emojiPicker && messageInput) {
+    const grid = document.createElement("div");
+    grid.className = "emoji-grid";
+    commonEmojis.forEach(emoji => {
+      const span = document.createElement("span");
+      span.className = "emoji-item";
+      span.textContent = emoji;
+      span.onclick = () => {
+        messageInput.value += emoji;
+        messageInput.focus();
+        emojiPicker.style.display = "none";
+      };
+      grid.appendChild(span);
+    });
+    emojiPicker.appendChild(grid);
+
+    emojiBtn.onclick = (e) => {
+      e.stopPropagation();
+      const isVisible = emojiPicker.style.display === "flex";
+      emojiPicker.style.display = isVisible ? "none" : "flex";
+    };
+
+    document.addEventListener("click", (e) => {
+      if (!emojiPicker.contains(e.target) && e.target !== emojiBtn) {
+        emojiPicker.style.display = "none";
+      }
+    });
+  }
 
   fetchChats();
   startPolling();

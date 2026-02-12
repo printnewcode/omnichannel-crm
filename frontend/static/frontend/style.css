@@ -325,20 +325,21 @@ body {
 }
 
 .unread-indicator {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background-color: #3b82f6;
-  /* Telegram-style blue */
   display: inline-block;
   margin-left: 8px;
-  box-shadow: 0 0 6px rgba(59, 130, 246, 0.5);
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.8);
   flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 .light-mode .unread-indicator {
   background-color: #2563eb;
   box-shadow: 0 0 4px rgba(37, 99, 235, 0.3);
+  border: none;
 }
 
 .chat-item.active .badge {
@@ -735,4 +736,121 @@ body {
   color: #bbb;
   text-decoration: none;
   cursor: pointer;
+}
+
+/* Date Dividers */
+.date-divider {
+  align-self: center;
+  margin: 16px 0;
+  padding: 4px 12px;
+  background: rgba(0, 0, 0, 0.4);
+  color: white;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 5;
+}
+
+.light-mode .date-divider {
+  background: rgba(0, 0, 0, 0.1);
+  color: #555;
+}
+
+/* Sticky Date Header */
+.sticky-date {
+  position: absolute;
+  top: 66px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(33, 33, 33, 0.8);
+  backdrop-filter: blur(4px);
+  color: white;
+  padding: 4px 16px;
+  border-radius: 16px;
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 100;
+  pointer-events: none;
+  transition: opacity 0.3s;
+  display: none;
+}
+
+.light-mode .sticky-date {
+  background: rgba(255, 255, 255, 0.8);
+  color: #333;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Account Status Banner */
+.account-status-banner {
+  position: absolute;
+  top: 66px;
+  left: 10px;
+  right: 10px;
+  background-color: #ff9800;
+  color: #000;
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 20;
+  border-radius: 10px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.account-status-banner i {
+  font-size: 18px;
+}
+
+/* Emoji Picker */
+.emoji-picker-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.emoji-picker {
+  position: absolute;
+  bottom: 50px;
+  right: 0px;
+  width: 320px;
+  height: 350px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 4px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.emoji-item {
+  font-size: 24px;
+  padding: 4px;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s;
+}
+
+.emoji-item:hover {
+  background: var(--item-hover);
+}
+
+.chat-messages {
+  position: relative;
 }
