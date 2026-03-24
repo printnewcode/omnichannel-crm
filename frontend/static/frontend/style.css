@@ -608,14 +608,13 @@ body {
 #notification-container {
   position: fixed;
   top: 20px;
-  left: 20px;
-  /* Aligned to left as per sidebar context usually, or right */
+  right: 20px;
   z-index: 9999;
   display: flex;
   flex-direction: column;
+  align-items: flex-end;
   gap: 10px;
   pointer-events: none;
-  /* Allow clicks through empty space */
 }
 
 .notification-toast {
@@ -667,7 +666,7 @@ body {
 @keyframes slideIn {
   from {
     opacity: 0;
-    transform: translateX(-20px);
+    transform: translateX(20px);
   }
 
   to {
@@ -679,7 +678,7 @@ body {
 @keyframes fadeOut {
   to {
     opacity: 0;
-    transform: translateX(-20px);
+    transform: translateX(20px);
   }
 }
 
@@ -853,4 +852,104 @@ body {
 
 .chat-messages {
   position: relative;
+}
+
+/* Sidebar Account Notifications */
+.sidebar-account-notifications {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+
+.account-notification-card {
+  background: rgba(255, 152, 0, 0.1);
+  border: 1px solid #ff9800;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: slideInSidebar 0.3s ease-out;
+}
+
+.light-mode .account-notification-card {
+  background: rgba(255, 152, 0, 0.05);
+}
+
+.account-notification-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #ff9800;
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.account-notification-header i {
+  font-size: 18px;
+}
+
+.account-notification-btn {
+  background: #ff9800;
+  color: white;
+  border: none;
+  border-radius: 18px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  align-self: flex-start;
+}
+
+.account-notification-btn:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+
+.account-notification-btn:active {
+  transform: translateY(0);
+}
+
+@keyframes slideInSidebar {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Activation Progress & Animations */
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+  display: inline-block;
+}
+
+.account-notification-card.authenticating {
+  background: rgba(135, 116, 225, 0.1);
+  border-color: var(--accent);
+}
+
+.activation-progress {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }

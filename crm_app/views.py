@@ -447,6 +447,20 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
         text = serializer.validated_data['text']
         media_path = serializer.validated_data.get('media_path')
 
+        # Проверка статуса аккаунта
+        if chat.telegram_account.status == TelegramAccount.AccountStatus.AUTHENTICATING:
+            return Response(
+                {'status': 'pending', 'message': f"Account {chat.telegram_account.name} is activating. Please wait."},
+                status=status.HTTP_202_ACCEPTED
+            )
+
+        if chat.telegram_account.status != TelegramAccount.AccountStatus.ACTIVE:
+            status_text = "неактивен" if chat.telegram_account.status == TelegramAccount.AccountStatus.INACTIVE else "имеет ошибку"
+            return Response(
+                {'error': f"Account is disconnected. Аккаунт {chat.telegram_account.name} {status_text}."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         # Проверка, что чат назначен оператору
         try:
             operator = Operator.objects.get(user=request.user, is_active=True)
@@ -600,6 +614,20 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
         text = serializer.validated_data['text']
         media_path = serializer.validated_data.get('media_path')
         
+        # Проверка статуса аккаунта
+        if message.chat.telegram_account.status == TelegramAccount.AccountStatus.AUTHENTICATING:
+            return Response(
+                {'status': 'pending', 'message': f"Account {message.chat.telegram_account.name} is activating. Please wait."},
+                status=status.HTTP_202_ACCEPTED
+            )
+
+        if message.chat.telegram_account.status != TelegramAccount.AccountStatus.ACTIVE:
+            status_text = "неактивен" if message.chat.telegram_account.status == TelegramAccount.AccountStatus.INACTIVE else "имеет ошибку"
+            return Response(
+                {'error': f"Account is disconnected. Аккаунт {message.chat.telegram_account.name} {status_text}."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         # Проверка, что чат назначен оператору
         try:
             operator = Operator.objects.get(user=request.user, is_active=True)

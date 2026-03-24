@@ -60,6 +60,9 @@
       <div class="sidebar-tabs">
         <div class="tab active">All</div>
       </div>
+      <div id="sidebar-account-notifications" class="sidebar-account-notifications">
+        <!-- Inactive/Error accounts will be injected here -->
+      </div>
       <ul id="chat-list" class="chat-list">
         <!-- Chat items injected by JS -->
       </ul>
@@ -89,12 +92,6 @@
         <div class="empty-state">Select a chat to start messaging</div>
       </div>
 
-      <!-- Account Status Banner -->
-      <div id="account-status-banner" class="account-status-banner" style="display: none;">
-        <i class="material-icons">warning</i>
-        <span id="account-status-text">Account is disconnected. Some features may be limited.</span>
-      </div>
-
       <!-- Upload Preview Area -->
       <div id="upload-preview" class="upload-preview" style="display: none;">
         <div class="upload-preview-content">
@@ -109,7 +106,8 @@
         <button type="button" class="icon-btn" id="attach-btn"><i class="material-icons">attach_file</i></button>
         <input id="message-input" type="text" placeholder="Message" />
         <div class="emoji-picker-container">
-          <button type="button" class="icon-btn" id="emoji-btn"><i class="material-icons">sentiment_satisfied_alt</i></button>
+          <button type="button" class="icon-btn" id="emoji-btn"><i
+              class="material-icons">sentiment_satisfied_alt</i></button>
           <div id="emoji-picker" class="emoji-picker" style="display: none;">
             <!-- Emojis will be injected by JS -->
           </div>

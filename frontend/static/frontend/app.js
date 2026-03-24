@@ -48,11 +48,20 @@ const getRussianError = (msg) => {
   if (msg.includes('HTTP 500')) return 'Ошибка сервера (500).';
   if (msg.includes('HTTP 403')) return 'Доступ запрещен (403).';
   if (msg.includes('Chat is not assigned')) return 'Чат не назначен оператору.';
+  if (msg.includes('Account is disconnected')) {
+    const parts = msg.split('. ');
+    return parts.length > 1 ? parts[1] : 'Аккаунт отключен. Пожалуйста, активируйте его в боковой панели.';
+  }
+  if (msg.includes('FloodWait')) return 'Слишком много запросов (FloodWait). Пожалуйста, подождите.';
+  if (msg.includes('UserDeactivatedError')) return 'Этот аккаунт Telegram был удален или деактивирован.';
+  if (msg.includes('SessionPasswordNeededError')) return 'Требуется пароль двухэтапной аутентификации.';
+  if (msg.includes('is activating')) return 'Аккаунт в процессе активации. Пожалуйста, подождите.';
 
   return msg; // Return original if no translation found
 };
 
 const showNotification = (title, message, duration = 5000) => {
+  console.log(`Notification: [${title}] ${message}`); // Debugging
   const container = document.getElementById('notification-container');
   if (!container) return;
 
@@ -68,16 +77,28 @@ const showNotification = (title, message, duration = 5000) => {
 
   container.appendChild(toast);
 
-  if (duration > 0) {
+  // Increase duration for important info
+  const finalDuration = (title === 'Ошибка' || message.includes('активаци')) ? duration * 2 : duration;
+
+  if (finalDuration > 0) {
     setTimeout(() => {
-      toast.style.animation = 'fadeOut 0.3s ease-out forwards';
-      setTimeout(() => toast.remove(), 300);
-    }, duration);
+      if (toast.parentElement) {
+        toast.style.animation = 'fadeOut 0.3s ease-out forwards';
+        setTimeout(() => toast.remove(), 300);
+      }
+    }, finalDuration);
   }
 };
 
-const setError = (message) => {
+const setError = (message, accountName = null) => {
   if (!message) return;
+
+  // If it's an account error, only show it once
+  if (accountName) {
+    if (notifiedAccounts.has(accountName)) return;
+    notifiedAccounts.add(accountName);
+  }
+
   const russianMessage = getRussianError(message);
   showNotification('Ошибка', russianMessage);
 };
@@ -93,11 +114,13 @@ const request = async (url, options = {}) => {
     const response = await fetch(url, { ...defaults, ...options });
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      const rawError = errorData.error || errorData.detail || `HTTP ${response.status}`;
+      console.error(`Request failed: ${url}`, errorData); // Debugging
+      const rawError = errorData.error || errorData.detail || errorData.message || `HTTP ${response.status}`;
       throw new Error(rawError);
     }
     return response.json();
   } catch (e) {
+    console.error(`Request error: ${url}`, e); // Debugging
     if (e.message === 'Failed to fetch') {
       throw new Error('NetworkError');
     }
@@ -123,6 +146,8 @@ let currentChatId = null;
 let lastRenderedMessageId = null;
 let currentMedia = null; // Store current uploaded media info
 let messageSearchQuery = ""; // Current search query for messages
+const notifiedAccounts = new Set(); // Track notified account errors
+let lastAccountsSnapshot = ""; // Prevent flickering in sidebar
 
 const selectChat = (id, label) => {
   currentChatId = id;
@@ -516,34 +541,117 @@ const clearUpload = () => {
 document.addEventListener("DOMContentLoaded", () => {
   const fetchChats = async () => {
     try {
-      const response = await fetch(`${apiBase}/chats/?assigned_only=1`);
-      const data = await response.json();
-      const chats = normalizeList(data);
-      renderChats(chats);
+      // Use allSettled to prevent one failed fetch from blocking the whole UI
+      const results = await Promise.allSettled([
+        request(`${apiBase}/chats/?assigned_only=1`),
+        request(`${apiBase}/accounts/`)
+      ]);
 
-      const inactive = [];
-      chats.forEach(c => {
-        // Safe check for telegram_account
-        if (c.telegram_account && c.telegram_account.status !== 'active') inactive.push(c.telegram_account.name);
-      });
+      let chats = [];
+      let accounts = [];
 
-      const banner = document.getElementById("account-status-banner");
-      const bannerText = document.getElementById("account-status-text");
-      if (banner && bannerText) {
-        if (inactive.length > 0) {
-          bannerText.textContent = `Accounts disconnected: ${inactive.join(', ')}. Please contact admin.`;
-          banner.style.display = "flex";
+      // Process chats result
+      if (results[0].status === 'fulfilled') {
+        chats = normalizeList(results[0].value);
+        renderChats(chats);
+      } else {
+        console.error("Chats fetch failed:", results[0].reason);
+      }
+
+      // Process accounts result
+      const notificationArea = document.getElementById("sidebar-account-notifications");
+      if (notificationArea) {
+        if (results[1].status === 'fulfilled') {
+          accounts = normalizeList(results[1].value);
+          // Show accounts that are not active (including authenticating)
+          const showAccounts = accounts.filter(acc => acc.status !== 'active');
+
+          const snapshot = showAccounts
+            .map(acc => `${acc.id}-${acc.status}-${acc.last_error || ''}`)
+            .sort()
+            .join('|');
+
+          if (snapshot !== lastAccountsSnapshot) {
+            notificationArea.innerHTML = "";
+            showAccounts.forEach(acc => {
+              const card = document.createElement("div");
+              card.className = "account-notification-card";
+              if (acc.status === 'authenticating') card.classList.add('authenticating');
+
+              let statusText = acc.status === 'error' ? 'Ошибка аккаунта' :
+                acc.status === 'authenticating' ? 'Активация...' : 'Аккаунт неактивен';
+              let icon = acc.status === 'error' ? 'error_outline' :
+                acc.status === 'authenticating' ? 'sync' : 'warning_amber';
+
+              card.innerHTML = `
+                <div class="account-notification-header">
+                  <i class="material-icons ${acc.status === 'authenticating' ? 'spin' : ''}">${icon}</i>
+                  <span>${acc.name}: ${statusText}</span>
+                </div>
+                ${acc.status === 'authenticating' ?
+                  '<div class="activation-progress">Пожалуйста, подождите...</div>' :
+                  `<button class="account-notification-btn" onclick="activateAccount(${acc.id}, '${acc.name}')">Активировать</button>`
+                }
+              `;
+              notificationArea.appendChild(card);
+
+              if (acc.status === 'error' && acc.last_error) {
+                setError(acc.last_error, acc.name);
+              } else if (acc.status === 'active' || acc.status === 'authenticating') {
+                // Clear error tracking if account becomes active or attempts authentication
+                notifiedAccounts.delete(acc.name);
+              }
+            });
+            lastAccountsSnapshot = snapshot;
+          }
         } else {
-          banner.style.display = "none";
+          console.error("Accounts fetch failed:", results[1].reason);
+          // If fetch fails, we reset snapshot to ensure retry on next poll if things recover
+          lastAccountsSnapshot = "";
         }
       }
 
-      // Select first chat if none selected
+      // Auto-select first chat if needed
       if (chats.length > 0 && !currentChatId) {
         selectChat(chats[0].id, chats[0].title || chats[0].username);
       }
     } catch (e) {
-      console.error(e);
+      console.error("Critical error in fetchChats:", e);
+      lastAccountsSnapshot = ""; // Reset on critical error too
+    }
+  };
+
+  window.activateAccount = async (id, name) => {
+    try {
+      showNotification('Информация', `Пожалуйста, подождите, аккаунт ${name} активируется...`, 3000);
+      setStatus(`Activating ${name}...`);
+
+      // Force immediate visual update if possible
+      const btn = event?.target;
+      if (btn && btn.tagName === 'BUTTON') {
+        const card = btn.closest('.account-notification-card');
+        if (card) {
+          card.classList.add('authenticating');
+          card.querySelector('.account-notification-header span').textContent = `${name}: Активация...`;
+          card.querySelector('.material-icons').textContent = 'sync';
+          card.querySelector('.material-icons').classList.add('spin');
+          btn.remove();
+          const progress = document.createElement('div');
+          progress.className = 'activation-progress';
+          progress.textContent = 'Пожалуйста, подождите...';
+          card.appendChild(progress);
+        }
+      }
+
+      await request(`${apiBase}/accounts/${id}/start/`, { method: 'POST' });
+      // Reset notification tracking for this account immediately
+      notifiedAccounts.delete(name);
+      // Next poll will confirm authenticating status
+      fetchChats();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setStatus("Online");
     }
   };
 
@@ -599,10 +707,16 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     try {
-      await request(`${apiBase}/chats/${currentChatId}/send_message/`, {
+      const res = await request(`${apiBase}/chats/${currentChatId}/send_message/`, {
         method: "POST",
         body: JSON.stringify(payload),
       });
+
+      // Handle 202 Accepted (Activation in progress)
+      if (res && res.status === 'pending') {
+        showNotification('Информация', `Сообщение будет отправлено после активации аккаунта. ${localizeError(res.message)}`);
+      }
+
       input.value = "";
       clearUpload(); // Clear media after send
       fetchMessages(true);
