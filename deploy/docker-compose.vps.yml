@@ -69,7 +69,7 @@ services:
       RUN_TELETHON_CLIENTS: "0"
     command: daphne -b 0.0.0.0 -p 8000 CRM.asgi:application
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8001:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
