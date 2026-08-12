@@ -895,7 +895,13 @@ class TelegramClientManager:
             # Catch up on missed messages
             try:
                 # Store catchup task separately so we can wait for it
-                self._catchup_tasks[account.id] = asyncio.create_task(self._catch_up_history(client, account, force=True))
+                # Telegram's catch_up() has already replayed missed updates. The
+                # history pass is only a safety net and must skip dialogs whose
+                # latest message is already stored; forcing it here caused a
+                # costly scan after every connector restart.
+                self._catchup_tasks[account.id] = asyncio.create_task(
+                    self._catch_up_history(client, account, force=False)
+                )
                 await self._catchup_tasks[account.id]
             except Exception as e:
                  logger.error(f"Failed to catch up history for {account.id}: {e}")
@@ -911,7 +917,7 @@ class TelegramClientManager:
                     await client.connect()
                     if await client.is_user_authorized():
                         await client.catch_up()
-                        await self.sync_messages_for_account(client, account, force=True)
+                        await self.sync_messages_for_account(client, account, force=False)
         except asyncio.CancelledError:
             logger.info(f"Stopped listening for account {account.id}")
             raise
@@ -1896,8 +1902,8 @@ class TelegramClientManager:
                         # logger.debug(f"Chat {chat_id} is up to date (last ID {last_db_id}), skipping messages fetch.")
                         continue
                     
-                    # Fetching logic: Get latest 20 messages for this chat.
-                    # Since we poll every 7s, limit=20 is more than enough coverage and faster.
+                    # Fetch only a small overlap for dialogs that are actually
+                    # behind. Live messages arrive through Telethon events.
                     logger.debug(f"Fetching last 20 messages for chat {chat_id} (reason: last_db_id={last_db_id} vs tg_id={dialog.message.id if dialog.message else 'None'})...")
                     history = await client.get_messages(chat_entity, limit=20)
                     

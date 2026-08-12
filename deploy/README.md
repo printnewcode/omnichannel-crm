@@ -74,6 +74,8 @@ sudo docker compose --env-file .env -f deploy/docker-compose.vps.yml ps
 
 У сервисов должен быть статус `Up`, а у `db` и `redis` — `healthy`.
 
+Compose-файл уже ограничивает omnichannel для VPS с 1 CPU и 2 ГБ RAM: в обычном режиме проект не может занять более 60% CPU и примерно 1 ГБ RAM. Эти лимиты не затрагивают другие проекты на сервере.
+
 ## 5. Подключить домен и HTTPS
 
 Откройте конфигурацию:
@@ -101,7 +103,7 @@ sudo certbot --nginx -d ВАШ.ДОМЕН
 ```bash
 cd /home/omnichannel-crm
 git pull
-sudo docker compose --env-file .env -f deploy/docker-compose.vps.yml up -d --build
+bash deploy/update.sh
 ```
 
 Миграции и статика применяются автоматически.
