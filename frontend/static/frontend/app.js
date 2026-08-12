@@ -57,6 +57,7 @@ const getRussianError = (msg) => {
 };
 
 const showNotification = (title, message, duration = 5000) => {
+  console.log(`Notification: [${title}] ${message}`); // Debugging
   const container = document.getElementById('notification-container');
   if (!container) return;
 
@@ -72,16 +73,28 @@ const showNotification = (title, message, duration = 5000) => {
 
   container.appendChild(toast);
 
-  if (duration > 0) {
+  // Increase duration for important info
+  const finalDuration = (title === 'Ошибка' || message.includes('активаци')) ? duration * 2 : duration;
+
+  if (finalDuration > 0) {
     setTimeout(() => {
-      toast.style.animation = 'fadeOut 0.3s ease-out forwards';
-      setTimeout(() => toast.remove(), 300);
-    }, duration);
+      if (toast.parentElement) {
+        toast.style.animation = 'fadeOut 0.3s ease-out forwards';
+        setTimeout(() => toast.remove(), 300);
+      }
+    }, finalDuration);
   }
 };
 
-const setError = (message) => {
+const setError = (message, accountName = null) => {
   if (!message) return;
+
+  // If it's an account error, only show it once
+  if (accountName) {
+    if (notifiedAccounts.has(accountName)) return;
+    notifiedAccounts.add(accountName);
+  }
+
   const russianMessage = getRussianError(message);
   showNotification('Ошибка', russianMessage);
 };
@@ -97,11 +110,13 @@ const request = async (url, options = {}) => {
     const response = await fetch(url, { ...defaults, ...options });
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      const rawError = errorData.error || errorData.detail || `HTTP ${response.status}`;
+      console.error(`Request failed: ${url}`, errorData); // Debugging
+      const rawError = errorData.error || errorData.detail || errorData.message || `HTTP ${response.status}`;
       throw new Error(rawError);
     }
     return response.json();
   } catch (e) {
+    console.error(`Request error: ${url}`, e); // Debugging
     if (e.message === 'Failed to fetch') {
       throw new Error('NetworkError');
     }
@@ -245,6 +260,13 @@ const selectChat = (id) => {
   });
 
   if (window.fetchMessagesGlobal) window.fetchMessagesGlobal(true);
+
+  // Clear unread immediately on client side
+  const chatItem = document.querySelector(`.chat-item[data-chat-id="${id}"]`);
+  if (chatItem) {
+    const unread = chatItem.querySelector('.unread-indicator');
+    if (unread) unread.remove();
+  }
 };
 
 const getInitials = (name) => {
@@ -469,16 +491,66 @@ window.onclick = (event) => {
 }
 
 let renderedMessageIds = new Set();
+let lastDateString = null;
+
+const formatDateHeader = (date) => {
+  const options = { month: 'long', day: 'numeric' };
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+
+  if (date.toDateString() === today.toDateString()) return 'Today';
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  if (date.getFullYear() !== today.getFullYear()) options.year = 'numeric';
+
+  return date.toLocaleDateString(undefined, options);
+};
+
+// Sticky date logic
+const updateStickyDate = () => {
+  const messageList = document.getElementById("message-list");
+  const stickyDateHeader = document.getElementById("sticky-date-header");
+  if (!messageList || !stickyDateHeader) return;
+
+  const dividers = Array.from(messageList.querySelectorAll('.date-divider'));
+  let currentDivider = null;
+
+  for (const divider of dividers) {
+    if (divider.offsetTop <= messageList.scrollTop + 80) {
+      currentDivider = divider;
+    } else {
+      break;
+    }
+  }
+
+  if (currentDivider) {
+    stickyDateHeader.textContent = currentDivider.textContent;
+    stickyDateHeader.style.display = 'block';
+  } else {
+    stickyDateHeader.style.display = 'none';
+  }
+};
 
 const renderMessages = (messages, forceScroll = false) => {
   const messageList = document.getElementById("message-list");
   if (!messageList) return;
+
+  // Ensure sticky header exists
+  let stickyDateHeader = document.getElementById("sticky-date-header");
+  if (!stickyDateHeader) {
+    stickyDateHeader = document.createElement("div");
+    stickyDateHeader.id = "sticky-date-header";
+    stickyDateHeader.className = "sticky-date";
+    messageList.parentElement.insertBefore(stickyDateHeader, messageList);
+    messageList.addEventListener('scroll', updateStickyDate);
+  }
 
   const isAtBottom = messageList.scrollHeight - messageList.scrollTop <= messageList.clientHeight + 150;
 
   if (forceScroll) {
     messageList.innerHTML = "";
     renderedMessageIds.clear();
+    lastDateString = null;
   }
 
   if (messages.length === 0) {
@@ -742,7 +814,42 @@ document.addEventListener("DOMContentLoaded", () => {
         selectChat(orderedChats[0].id);
       }
     } catch (e) {
-      console.error(e);
+      console.error("Critical error in fetchChats:", e);
+      lastAccountsSnapshot = ""; // Reset on critical error too
+    }
+  };
+
+  window.activateAccount = async (id, name) => {
+    try {
+      showNotification('Информация', `Пожалуйста, подождите, аккаунт ${name} активируется...`, 3000);
+      setStatus(`Activating ${name}...`);
+
+      // Force immediate visual update if possible
+      const btn = event?.target;
+      if (btn && btn.tagName === 'BUTTON') {
+        const card = btn.closest('.account-notification-card');
+        if (card) {
+          card.classList.add('authenticating');
+          card.querySelector('.account-notification-header span').textContent = `${name}: Активация...`;
+          card.querySelector('.material-icons').textContent = 'sync';
+          card.querySelector('.material-icons').classList.add('spin');
+          btn.remove();
+          const progress = document.createElement('div');
+          progress.className = 'activation-progress';
+          progress.textContent = 'Пожалуйста, подождите...';
+          card.appendChild(progress);
+        }
+      }
+
+      await request(`${apiBase}/accounts/${id}/start/`, { method: 'POST' });
+      // Reset notification tracking for this account immediately
+      notifiedAccounts.delete(name);
+      // Next poll will confirm authenticating status
+      fetchChats();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setStatus("Online");
     }
   };
 

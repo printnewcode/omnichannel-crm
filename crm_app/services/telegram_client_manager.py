@@ -89,11 +89,27 @@ class TelegramClientManager:
             if self._loop and self._loop.is_running():
                 return self._loop
 
-            self._loop = asyncio.new_event_loop()
+            # On Windows, SelectorEventLoop is often more stable for Telethon in a background thread
+            if os.name == 'nt':
+                try:
+                    self._loop = asyncio.SelectorEventLoop()
+                except Exception:
+                    self._loop = asyncio.new_event_loop()
+            else:
+                self._loop = asyncio.new_event_loop()
 
             def runner(loop: asyncio.AbstractEventLoop):
                 asyncio.set_event_loop(loop)
-                loop.run_forever()
+                try:
+                    loop.run_forever()
+                except Exception as e:
+                    logger.error(f"Error in Telethon background loop: {e}")
+                finally:
+                    # Cleanup loop on exit
+                    try:
+                        loop.close()
+                    except:
+                        pass
 
             self._loop_thread = threading.Thread(target=runner, args=(self._loop,), daemon=True, name="TelethonManagerLoop")
             self._loop_thread.start()
