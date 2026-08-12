@@ -161,7 +161,7 @@ class WhatsAppWebhookView(APIView):
             chat_id = sender.get('chatId') or sender.get('sender')
             raw_chat_type = str(sender.get('chatType') or '').lower()
             if account.account_type == TelegramAccount.AccountType.MAX:
-                if raw_chat_type not in {'user', 'group'}:
+                if raw_chat_type not in {'user', 'group', 'bot'}:
                     logger.info('Ignored MAX %s chat %s on account %s', raw_chat_type or 'unknown', chat_id, account.id)
                     return Response({'status': 'ignored', 'processed': 0})
                 # GREEN-API MAX group identifiers are negative. Keep this fallback because

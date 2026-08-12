@@ -38,7 +38,7 @@ docker compose up --build
 
 Compose поднимает все нужные процессы: `db`, `redis`, `migrate`, `web`, `connector`, `worker`. Это ближе к production и убирает необходимость вручную открывать несколько терминалов.
 
-Подробная локальная настройка описана в [SETUP.md](SETUP.md). Production-развертывание на Linux VPS описано в [deploy/README.md](deploy/README.md).
+Подробная локальная настройка описана в [SETUP.md](SETUP.md). Короткая инструкция для Beget VPS находится в [deploy/README.md](deploy/README.md).
 
 ## Очередь диалогов
 
@@ -56,7 +56,7 @@ Compose поднимает все нужные процессы: `db`, `redis`, 
 
 - [SETUP.md](SETUP.md) — короткие практические шаги запуска, подключения каналов и ежедневного управления.
 - [TECHNICAL_OPERATIONS.md](TECHNICAL_OPERATIONS.md) — устройство Docker, переменные, хранилища, ручной запуск и расширенная диагностика.
-- [deploy/README.md](deploy/README.md) — практическое production-развертывание на Linux VPS с Docker Compose, Nginx, резервными копиями и обновлением.
+- [deploy/README.md](deploy/README.md) — короткие команды для запуска и обновления проекта на Beget VPS.
 - [EXISTING_BOT_INTEGRATION.md](EXISTING_BOT_INTEGRATION.md) — протокол интеграции существующего Telegram-бота с CRM.
 
 ## Структура репозитория

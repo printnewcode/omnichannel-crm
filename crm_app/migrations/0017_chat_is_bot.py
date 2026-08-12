@@ -16,6 +16,11 @@ def classify_telegram_bots(apps, schema_editor):
         chat_type='private',
         telegram_id=777000,
     ).update(is_bot=True)
+    Chat.objects.filter(
+        telegram_account__account_type='personal',
+        chat_type='private',
+        title__icontains='bot',
+    ).update(is_bot=True)
 
 
 class Migration(migrations.Migration):
