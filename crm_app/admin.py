@@ -1,23 +1,43 @@
 """
 Административный интерфейс Django
 """
+from urllib.parse import urljoin, urlsplit
+
+from django.conf import settings
 from django.contrib import admin
 from django.shortcuts import render, redirect
-from django.urls import path
+from django.urls import path, reverse
 from django.contrib import messages
 from django.utils.html import format_html
 from .models import (
-    TelegramAccount, Chat, Message, Operator, ChatAssignment
+    TelegramAccount, Chat, Message, OutboundDelivery
 )
 
 
 @admin.register(TelegramAccount)
 class TelegramAccountAdmin(admin.ModelAdmin):
-    list_display = ['name', 'account_type', 'status', 'running_status', 'phone_number', 'bot_username', 'last_activity', 'otp_link', 'qr_link']
+    list_display = ['name', 'account_type', 'status', 'channel_connection', 'last_activity', 'error_summary', 'otp_link', 'qr_link']
     list_filter = ['account_type', 'status', 'created_at']
-    search_fields = ['name', 'phone_number', 'bot_username', 'username']
+    ordering = ['account_type', 'name']
+    list_per_page = 50
+    save_on_top = True
+    search_fields = ['name', 'phone_number', 'bot_username', 'username', 'green_api_instance_id']
     readonly_fields = ['created_at', 'updated_at', 'last_activity']
-    actions = ['start_authentication', 'resend_code', 'request_manual_code', 'start_accounts', 'stop_accounts', 'restart_accounts', 'check_auth_status', 'terminate_sessions']
+    actions = ['start_authentication', 'resend_code', 'request_manual_code', 'start_accounts', 'stop_accounts', 'restart_accounts', 'check_auth_status', 'terminate_sessions', 'configure_green_api_webhooks']
+
+    @admin.display(description='Подключение')
+    def channel_connection(self, obj):
+        if obj.account_type == TelegramAccount.AccountType.PERSONAL:
+            return obj.phone_number or obj.username or 'Не указан телефон'
+        if obj.account_type == TelegramAccount.AccountType.BOT:
+            return f'@{obj.bot_username.lstrip(chr(64))}' if obj.bot_username else 'Не указан username бота'
+        return f'idInstance {obj.green_api_instance_id}' if obj.green_api_instance_id else 'Не указан idInstance'
+
+    @admin.display(description='Последняя ошибка')
+    def error_summary(self, obj):
+        if not obj.last_error:
+            return '—'
+        return obj.last_error[:90] + ('…' if len(obj.last_error) > 90 else '')
 
     fieldsets = (
         ('Основная информация', {
@@ -28,7 +48,11 @@ class TelegramAccountAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
         ('Бот (pyTelegramBotAPI)', {
-            'fields': ('bot_token', 'bot_username'),
+            'fields': ('bot_token', 'bot_username', 'bridge_url', 'bridge_secret'),
+            'classes': ('collapse',)
+        }),
+        ('GREEN-API (WhatsApp / личный MAX)', {
+            'fields': ('green_api_instance_id', 'green_api_token', 'green_webhook_token', 'green_api_url', 'green_media_url'),
             'classes': ('collapse',)
         }),
         ('Метаданные', {
@@ -43,6 +67,51 @@ class TelegramAccountAdmin(admin.ModelAdmin):
         }),
     )
 
+    def get_fieldsets(self, request, obj=None):
+        """Show only fields relevant to the selected messenger on change pages."""
+        if obj is None:
+            # Technical metadata and error history are populated after the first save.
+            return self.fieldsets[:4]
+        sections = [self.fieldsets[0]]
+        if obj.account_type == TelegramAccount.AccountType.PERSONAL:
+            sections.extend([self.fieldsets[1], self.fieldsets[4]])
+        elif obj.account_type == TelegramAccount.AccountType.BOT:
+            sections.append(self.fieldsets[2])
+        elif obj.account_type in {TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX}:
+            sections.append(self.fieldsets[3])
+        sections.extend([self.fieldsets[5], self.fieldsets[6]])
+        return tuple(sections)
+    @admin.action(description='Настроить webhook выбранных WhatsApp/MAX аккаунтов в GREEN-API')
+    def configure_green_api_webhooks(self, request, queryset):
+        from .services.whatsapp_client import GreenAPIClient
+
+        success = 0
+        for account in queryset:
+            if account.account_type not in {
+                TelegramAccount.AccountType.WHATSAPP,
+                TelegramAccount.AccountType.MAX,
+            }:
+                continue
+            try:
+                route_name = 'max-webhook' if account.account_type == TelegramAccount.AccountType.MAX else 'whatsapp-webhook'
+                public_base_url = (settings.DOMAIN or '').strip().rstrip('/')
+                if public_base_url and '://' not in public_base_url:
+                    public_base_url = f'https://{public_base_url}'
+                parsed = urlsplit(public_base_url)
+                if parsed.scheme != 'https' or not parsed.hostname or parsed.hostname in {'localhost', '127.0.0.1', '0.0.0.0'}:
+                    raise ValueError(
+                        'DOMAIN должен содержать публичный HTTPS-адрес CRM, например https://crm.example.com'
+                    )
+                webhook_url = urljoin(
+                    f'{public_base_url}/',
+                    reverse(route_name, kwargs={'account_id': account.id}).lstrip('/'),
+                )
+                GreenAPIClient(account).configure_webhook(webhook_url)
+                success += 1
+            except Exception as exc:
+                self.message_user(request, f'{account.name}: {exc}', level=messages.ERROR)
+        if success:
+            self.message_user(request, f'GREEN-API webhooks настроены: {success}', level=messages.SUCCESS)
     def start_authentication(self, request, queryset):
         """Запустить аутентификацию для выбранных личных аккаунтов"""
         from .services.telegram_client_manager import TelegramClientManager
@@ -226,101 +295,58 @@ class TelegramAccountAdmin(admin.ModelAdmin):
     request_manual_code.short_description = "📱 Запросить код вручную (для отладки)"
 
     def start_accounts(self, request, queryset):
-        """Запустить выбранные аккаунты"""
-        from .services.telegram_client_manager import TelegramClientManager
-        from asgiref.sync import async_to_sync
-
-        success_count = 0
-
+        """Request startup in the dedicated connector process."""
+        ready_ids = []
         for account in queryset:
-            try:
-                manager = TelegramClientManager()
-                result = manager.start_client_sync(account)
+            if account.account_type != TelegramAccount.AccountType.PERSONAL:
+                self.message_user(request, f'«{account.name}»: действие доступно только для личного Telegram.', level=messages.WARNING)
+            elif not account.session_string:
+                self.message_user(request, f'«{account.name}»: сначала выполните авторизацию.', level=messages.WARNING)
+            else:
+                ready_ids.append(account.id)
 
-                if result:
-                    success_count += 1
-                    self.message_user(request, f'Аккаунт "{account.name}" запущен.')
-                else:
-                    self.message_user(
-                        request,
-                        f'Не удалось запустить "{account.name}": {account.last_error}',
-                        level='error'
-                    )
-            except Exception as e:
-                self.message_user(
-                    request,
-                    f'Ошибка при запуске "{account.name}": {str(e)}',
-                    level='error'
-                )
+        updated = TelegramAccount.objects.filter(id__in=ready_ids).update(
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            last_error='',
+            restart_requested_at=None,
+        )
+        if updated:
+            self.message_user(request, f'Запуск передан connector: {updated}. Подключение займёт несколько секунд.')
 
-        self.message_user(request, f'Запущено {success_count} из {queryset.count()} аккаунтов.')
-
-    start_accounts.short_description = "▶️ Запустить аккаунты"
-
+    start_accounts.short_description = "▶️ Запустить аккаунты через connector"
     def stop_accounts(self, request, queryset):
-        """Остановить выбранные аккаунты"""
-        from .services.telegram_client_manager import TelegramClientManager
-        from asgiref.sync import async_to_sync
+        """Request shutdown in the dedicated connector process."""
+        updated = queryset.filter(
+            account_type=TelegramAccount.AccountType.PERSONAL,
+        ).update(
+            status=TelegramAccount.AccountStatus.INACTIVE,
+            restart_requested_at=None,
+        )
+        if updated:
+            self.message_user(request, f'Остановка передана connector: {updated}.')
+        else:
+            self.message_user(request, 'Личные Telegram-аккаунты не выбраны.', level=messages.WARNING)
 
-        stopped_count = 0
-
-        for account in queryset:
-            try:
-                manager = TelegramClientManager()
-                result = manager.stop_client_sync(account.id)
-
-                if result:
-                    stopped_count += 1
-                    self.message_user(request, f'Аккаунт "{account.name}" остановлен.')
-                else:
-                    self.message_user(
-                        request,
-                        f'Не удалось остановить "{account.name}"',
-                        level='warning'
-                    )
-            except Exception as e:
-                self.message_user(
-                    request,
-                    f'Ошибка при остановке "{account.name}": {str(e)}',
-                    level='error'
-                )
-
-        self.message_user(request, f'Остановлено {stopped_count} из {queryset.count()} аккаунтов.')
-
-    stop_accounts.short_description = "⏹️ Остановить аккаунты"
-
+    stop_accounts.short_description = "⏹️ Остановить аккаунты через connector"
     def restart_accounts(self, request, queryset):
-        """Перезапустить выбранные аккаунты"""
-        from .services.telegram_client_manager import TelegramClientManager
-        from asgiref.sync import async_to_sync
+        """Request reconnect in the dedicated connector process."""
+        from django.utils import timezone
 
-        restarted_count = 0
+        ready_ids = [
+            account.id for account in queryset
+            if account.account_type == TelegramAccount.AccountType.PERSONAL and account.session_string
+        ]
+        updated = TelegramAccount.objects.filter(id__in=ready_ids).update(
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            last_error='',
+            restart_requested_at=timezone.now(),
+        )
+        if updated:
+            self.message_user(request, f'Перезапуск передан connector: {updated}.')
+        else:
+            self.message_user(request, 'Нет авторизованных личных Telegram-аккаунтов.', level=messages.WARNING)
 
-        for account in queryset:
-            try:
-                manager = TelegramClientManager()
-                result = manager.restart_client_sync(account.id)
-
-                if result:
-                    restarted_count += 1
-                    self.message_user(request, f'Аккаунт "{account.name}" перезапущен.')
-                else:
-                    self.message_user(
-                        request,
-                        f'Не удалось перезапустить "{account.name}": {account.last_error}',
-                        level='error'
-                    )
-            except Exception as e:
-                self.message_user(
-                    request,
-                    f'Ошибка при перезапуске "{account.name}": {str(e)}',
-                    level='error'
-                )
-
-        self.message_user(request, f'Перезапущено {restarted_count} из {queryset.count()} аккаунтов.')
-
-    restart_accounts.short_description = "🔄 Перезапустить аккаунты"
-
+    restart_accounts.short_description = "🔄 Перезапустить аккаунты через connector"
     def terminate_sessions(self, request, queryset):
         """Force logout and clear all session data from Telegram and DB"""
         from .services.telegram_client_manager import TelegramClientManager
@@ -369,43 +395,18 @@ class TelegramAccountAdmin(admin.ModelAdmin):
 
     check_auth_status.short_description = "🔍 Проверить статус авторизации"
 
-    def changelist_view(self, request, extra_context=None):
-        """Perform automatic session check for active accounts (once every 15 min)"""
-        from django.utils import timezone
-        from .services.telegram_client_manager import TelegramClientManager
-        import threading
-
-        # Only check on the first page or when not filtering to avoid excessive load
-        if not request.GET or 'p' not in request.GET:
-            manager = TelegramClientManager()
-            # Find accounts that are ACTIVE but haven't been checked in 15 minutes
-            check_threshold = timezone.now() - timezone.timedelta(minutes=15)
-            # We don't have a 'last_checked_at' field in the model, so we use 'updated_at' as a proxy 
-            # or just do it for all ACTIVE ones in a separate thread to avoid blocking UI
-            accounts_to_check = TelegramAccount.objects.filter(
-                account_type=TelegramAccount.AccountType.PERSONAL,
-                status=TelegramAccount.AccountStatus.ACTIVE
-            )
-            
-            # Start background check if there are any accounts
-            if accounts_to_check.exists():
-                def background_check():
-                    for account in accounts_to_check:
-                        manager.check_authorization_sync(account)
-                
-                threading.Thread(target=background_check, daemon=True).start()
-
-        return super().changelist_view(request, extra_context=extra_context)
-
     def running_status(self, obj):
-        """Показывает запущен ли клиент"""
+        """Show desired connector state; Telethon runs in another process."""
         if obj.account_type != TelegramAccount.AccountType.PERSONAL:
             return '-'
-        from .services.telegram_client_manager import TelegramClientManager
-        manager = TelegramClientManager()
-        return "✅ Запущен" if obj.id in manager.get_running_accounts() else "⏹️ Остановлен"
-    running_status.short_description = "Состояние клиента"
-
+        if obj.status == TelegramAccount.AccountStatus.ACTIVE:
+            return "🟢 Включен"
+        if obj.status == TelegramAccount.AccountStatus.ERROR:
+            return "⚠️ Ошибка"
+        if obj.status == TelegramAccount.AccountStatus.AUTHENTICATING:
+            return "🔐 Авторизация"
+        return "⏹️ Отключен"
+    running_status.short_description = "Режим connector"
     def otp_link(self, obj):
         """Ссылка на верификацию OTP"""
         if obj.account_type == TelegramAccount.AccountType.PERSONAL:
@@ -561,33 +562,43 @@ class TelegramAccountAdmin(admin.ModelAdmin):
 
 @admin.register(Chat)
 class ChatAdmin(admin.ModelAdmin):
-    list_display = ['title', 'chat_type', 'telegram_account', 'unread_count', 'last_message_at']
-    list_filter = ['chat_type', 'created_at', 'telegram_account']
+    list_display = ['title', 'chat_type', 'is_bot', 'telegram_account', 'is_archived', 'unread_count', 'last_message_at']
+    list_filter = ['is_archived', 'is_bot', 'chat_type', 'created_at', 'telegram_account']
     search_fields = ['title', 'username', 'first_name', 'telegram_id']
     readonly_fields = ['created_at', 'updated_at', 'last_message_at']
     raw_id_fields = ['telegram_account']
 
+    def has_add_permission(self, request):
+        return False
+
 
 @admin.register(Message)
 class MessageAdmin(admin.ModelAdmin):
-    list_display = ['telegram_id', 'chat', 'message_type', 'status', 'is_outgoing', 'telegram_date']
+    @admin.display(description='ID у провайдера')
+    def provider_message_id(self, obj):
+        return obj.external_message_id or obj.telegram_id or '—'
+    list_display = ['provider_message_id', 'chat', 'message_type', 'status', 'is_outgoing', 'telegram_date']
     list_filter = ['message_type', 'status', 'is_outgoing', 'telegram_date']
-    search_fields = ['text', 'telegram_id', 'from_user_name']
+    search_fields = ['text', 'telegram_id', 'external_message_id', 'from_user_name']
     readonly_fields = ['created_at', 'updated_at']
     raw_id_fields = ['chat', 'reply_to_message']
     date_hierarchy = 'telegram_date'
 
-
-@admin.register(Operator)
-class OperatorAdmin(admin.ModelAdmin):
-    list_display = ['user', 'is_active', 'max_chats', 'current_chats']
-    list_filter = ['is_active', 'created_at']
-    search_fields = ['user__username', 'user__email']
-    raw_id_fields = ['user']
+    def has_add_permission(self, request):
+        return False
 
 
-@admin.register(ChatAssignment)
-class ChatAssignmentAdmin(admin.ModelAdmin):
-    list_display = ['chat', 'operator', 'is_active', 'assigned_at']
-    list_filter = ['is_active', 'assigned_at']
-    raw_id_fields = ['chat', 'operator']
+@admin.register(OutboundDelivery)
+class OutboundDeliveryAdmin(admin.ModelAdmin):
+    list_display = ['id', 'chat', 'status', 'attempts', 'provider_message_id', 'created_at']
+    list_filter = ['status', 'created_at']
+    search_fields = ['text', 'last_error', 'provider_message_id']
+    readonly_fields = ['idempotency_key', 'attempts', 'provider_message_id', 'created_message', 'created_at', 'updated_at']
+    raw_id_fields = ['chat', 'reply_to_message', 'requested_by']
+
+    def has_add_permission(self, request):
+        return False
+
+admin.site.site_header = 'Omnichannel CRM — администрирование'
+admin.site.site_title = 'Omnichannel CRM'
+admin.site.index_title = 'Каналы, диалоги и сообщения'

@@ -6,7 +6,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Omnichannel CRM</title>
-  <link rel="stylesheet" href="{% static 'frontend/style.css' %}" />
+  <link rel="stylesheet" href="{% static 'frontend/style.css' %}?v=20260812-final-audit-b" />
   <!-- Material Icons -->
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
@@ -46,20 +46,26 @@
 
     <!-- Sidebar -->
     <aside class="sidebar">
+      <div class="workspace-header">
+        <div><div class="workspace-eyebrow">Omnichannel</div><div class="workspace-title">Диалоги</div></div>
+        <button class="header-icon-button" id="theme-toggle" onclick="toggleTheme()" title="Сменить тему" aria-label="Сменить тему"><i class="material-icons">brightness_6</i></button>
+      </div>
+      <nav class="messenger-switcher" aria-label="Выбор мессенджера">
+        <button class="messenger-option active" type="button" data-messenger="telegram" aria-pressed="true"><span class="messenger-icon telegram-icon"><i class="material-icons">send</i></span><span>Telegram</span></button>
+        <button class="messenger-option" type="button" data-messenger="max" aria-pressed="false"><span class="messenger-icon max-icon">M</span><span>MAX</span></button>
+        <button class="messenger-option" type="button" data-messenger="whatsapp" aria-pressed="false"><span class="messenger-icon whatsapp-icon"><i class="material-icons">chat</i></span><span>WhatsApp</span></button>
+      </nav>
       <div class="sidebar-header">
-        <!-- Menu button removed as requested -->
-        <i class="material-icons menu-icon">menu</i>
-        <!-- Theme Toggle -->
-        <i class="material-icons menu-icon" id="theme-toggle" onclick="toggleTheme()" title="Toggle Theme"
-          style="margin-left: auto; margin-right: 10px;">brightness_6</i>
-        <div class="search-bar">
-          <i class="material-icons search-icon">search</i>
-          <input type="text" placeholder="Search" id="chat-search">
-        </div>
+        <div class="search-bar"><i class="material-icons search-icon">search</i><input type="text" placeholder="Поиск по диалогам" id="chat-search" aria-label="Поиск по диалогам"></div>
       </div>
-      <div class="sidebar-tabs">
-        <div class="tab active">All</div>
-      </div>
+      <div id="account-health" class="account-health" hidden></div>
+      <button type="button" id="archive-toggle" class="archive-toggle" aria-pressed="false">
+        <span class="archive-toggle-icon"><i class="material-icons">inventory_2</i></span>
+        <span class="archive-toggle-copy"><strong>Архив</strong><small id="archive-subtitle">Нет архивных диалогов</small></span>
+        <span class="archive-count" id="archive-count">0</span>
+        <i class="material-icons archive-chevron">chevron_right</i>
+      </button>
+      <div class="sidebar-tabs"><div class="tab active" id="chat-list-title">Все диалоги</div><div class="chat-count" id="chat-count">0</div></div>
       <ul id="chat-list" class="chat-list">
         <!-- Chat items injected by JS -->
       </ul>
@@ -69,45 +75,51 @@
     <main class="main-chat">
       <div class="chat-header">
         <div class="chat-header-info">
-          <div class="chat-header-title" id="active-chat">Select a chat</div>
-          <div class="chat-header-status" id="chat-status"></div>
+          <div class="chat-header-title" id="active-chat">Выберите диалог</div>
+          <div class="chat-header-status" id="chat-status">Сообщения выбранного чата появятся здесь</div>
         </div>
-        <div class="chat-header-actions" style="display: flex; align-items: center;">
-          <div id="message-search-container"
-            style="display: none; align-items: center; background: rgba(0,0,0,0.1); border-radius: 18px; padding: 4px 8px; margin-right: 10px;">
-            <input type="text" id="message-search-input" placeholder="Search..."
-              style="border: none; outline: none; background: transparent; color: var(--text-primary); width: 150px; font-size: 14px;">
-            <i class="material-icons" id="message-search-close"
-              style="font-size: 18px; cursor: pointer; color: #707579;">close</i>
+        <div class="chat-header-actions">
+          <div id="message-search-container" class="message-search" hidden>
+            <i class="material-icons" aria-hidden="true">search</i>
+            <input type="search" id="message-search-input" placeholder="Поиск в переписке" aria-label="Поиск в переписке">
+            <button type="button" class="message-search-close" id="message-search-close" aria-label="Закрыть поиск"><i class="material-icons">close</i></button>
           </div>
-          <i class="material-icons" id="message-search-btn" style="cursor: pointer;">search</i>
+          <button type="button" class="header-icon-button" id="message-search-btn" aria-label="Поиск по сообщениям" title="Поиск по сообщениям"><i class="material-icons">search</i></button>
         </div>
       </div>
 
       <div class="chat-messages" id="message-list">
         <!-- Messages injected by JS -->
-        <div class="empty-state">Select a chat to start messaging</div>
+        <div class="empty-state"><i class="material-icons">forum</i><strong>Выберите диалог</strong><span>Здесь появится история сообщений</span></div>
+      </div>
+
+      <div id="reply-composer" class="reply-composer" hidden>
+        <i class="material-icons">reply</i>
+        <div><strong id="reply-title">Ответ</strong><span id="reply-preview"></span></div>
+        <button type="button" class="icon-btn" id="reply-cancel" aria-label="Отменить ответ"><i class="material-icons">close</i></button>
       </div>
 
       <!-- Upload Preview Area -->
-      <div id="upload-preview" class="upload-preview" style="display: none;">
-        <div class="upload-preview-content">
-          <i class="material-icons">description</i>
-          <span id="upload-filename">filename.jpg</span>
-          <i class="material-icons close-preview" id="clear-upload">close</i>
-        </div>
+      <div id="upload-preview" class="upload-preview" hidden>
+        <div id="upload-preview-list" class="upload-preview-list"></div>
+        <button type="button" class="clear-all-uploads" id="clear-upload">Очистить</button>
       </div>
 
       <form id="send-form" class="chat-input-area" autocomplete="off">
-        <input type="file" id="media-upload" style="display: none;" />
-        <button type="button" class="icon-btn" id="attach-btn"><i class="material-icons">attach_file</i></button>
-        <input id="message-input" type="text" placeholder="Message" />
-        <button type="button" class="icon-btn"><i class="material-icons">sentiment_satisfied_alt</i></button>
-        <button type="submit" class="icon-btn send-btn" id="send-button"><i class="material-icons">send</i></button>
+        <input type="file" id="media-upload" multiple style="display: none;" />
+        <button type="button" class="icon-btn" id="attach-btn" title="Прикрепить файлы" aria-label="Прикрепить файлы"><i class="material-icons">attach_file</i></button>
+        <button type="button" class="icon-btn" id="emoji-btn" title="Эмодзи" aria-label="Открыть меню эмодзи"><i class="material-icons">sentiment_satisfied_alt</i></button>
+        <div id="emoji-picker" class="emoji-picker" hidden role="dialog" aria-label="Выбор эмодзи"></div>
+        <input id="message-input" type="text" placeholder="Написать сообщение…" />
+        <button type="submit" class="icon-btn send-btn" id="send-button" title="Отправить" aria-label="Отправить"><i class="material-icons">send</i></button>
       </form>
     </main>
 
     {% endif %}
+  </div>
+
+  <div id="chat-context-menu" class="chat-context-menu" hidden>
+    <button type="button" id="chat-archive-action"><i class="material-icons">archive</i><span>Убрать в архив</span></button>
   </div>
 
   <!-- Notification Container -->
@@ -121,7 +133,7 @@
     <img class="media-viewer-content" id="media-viewer-img">
     <video class="media-viewer-content" id="media-viewer-video" controls style="display: none;"></video>
   </div>
-  <script src="{% static 'frontend/app.js' %}"></script>
+  <script src="{% static 'frontend/app.js' %}?v=20260812-final-audit-b"></script>
 </body>
 
 </html>

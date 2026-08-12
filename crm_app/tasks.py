@@ -6,9 +6,11 @@ import logging
 from celery import shared_task
 from django.utils import timezone
 from django.conf import settings
+from django.db.models import F
 from typing import Optional
 import requests
 from .models import Message, Chat, TelegramAccount
+from .services.realtime import publish_message
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +107,14 @@ def process_incoming_message(
             message.save()
         
         # Если есть медиа, запускаем задачу на скачивание
+        if created:
+            Chat.objects.filter(pk=chat.pk).update(
+                message_count=F('message_count') + 1,
+                unread_count=F('unread_count') + (0 if is_outgoing else 1),
+                last_message_at=message.telegram_date,
+            )
+
+        publish_message(message.id)
         if media_file_id and message_type in ['photo', 'video', 'voice', 'document']:
             download_media.delay(
                 account_id=account_id,
@@ -214,6 +224,25 @@ def download_media(
         logger.exception(f"Error downloading media: {e}")
         raise self.retry(exc=e, countdown=60)
 
+
+@shared_task(bind=True, max_retries=3)
+def download_green_api_media_task(self, message_id: int):
+    """Download an incoming GREEN-API attachment outside the webhook request."""
+    from .services.provider_media import download_green_api_media
+
+    try:
+        message = Message.objects.select_related('chat__telegram_account').get(id=message_id)
+        if message.chat.telegram_account.account_type not in {TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX}:
+            return None
+        result = download_green_api_media(message)
+        publish_message(message.id)
+        return result
+    except Message.DoesNotExist:
+        logger.warning('GREEN-API media message %s no longer exists', message_id)
+        return None
+    except Exception as exc:
+        logger.exception('Could not download GREEN-API media for message %s', message_id)
+        raise self.retry(exc=exc, countdown=min(300, 15 * (2 ** self.request.retries)))
 
 @shared_task
 def cleanup_old_messages():

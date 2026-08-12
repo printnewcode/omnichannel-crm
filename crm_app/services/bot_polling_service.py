@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import aiohttp
 from django.conf import settings
 from django.db import close_old_connections
+from django.db.models import F
 from asgiref.sync import sync_to_async
 from channels.db import database_sync_to_async
 from ..models import TelegramAccount, Chat, Message
@@ -72,6 +73,9 @@ class BotPollingService:
             # Find or create chat
             chat_data = message_data.get('chat', {})
             chat_id = chat_data.get('id')
+            chat_type = self.get_chat_type(chat_data)
+            if chat_type == Chat.ChatType.CHANNEL:
+                return
 
             # Get or create TelegramAccount for this bot
             account = await database_sync_to_async(self.get_or_create_bot_account)()
@@ -81,11 +85,12 @@ class BotPollingService:
                 telegram_id=chat_id,
                 telegram_account=account,
                 defaults={
-                    'chat_type': self.get_chat_type(chat_data),
+                    'chat_type': chat_type,
                     'title': chat_data.get('title'),
                     'username': chat_data.get('username'),
                     'first_name': chat_data.get('first_name'),
                     'last_name': chat_data.get('last_name'),
+                    'is_bot': chat_type == Chat.ChatType.PRIVATE and bool(chat_data.get('is_bot')),
                 }
             )
 
@@ -105,6 +110,11 @@ class BotPollingService:
                 metadata=message_data  # Store full message data
             )
 
+            await database_sync_to_async(Chat.objects.filter(pk=chat.pk).update)(
+                message_count=F('message_count') + 1,
+                unread_count=F('unread_count') + 1,
+                last_message_at=message.telegram_date,
+            )
             logger.info(f"Processed message {message.telegram_id} in chat {chat_id}")
 
         except Exception as e:

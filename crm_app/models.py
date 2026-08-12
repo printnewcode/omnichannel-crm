@@ -6,14 +6,17 @@ from django.contrib.auth.models import User
 from django.core.validators import MinLengthValidator
 from django.utils import timezone
 import json
+import uuid
 
 
 class TelegramAccount(models.Model):
     """Модель для хранения данных Telegram аккаунтов (личные аккаунты и боты)"""
     
     class AccountType(models.TextChoices):
-        PERSONAL = 'personal', 'Личный аккаунт (Telethon)'
-        BOT = 'bot', 'Бот (pyTelegramBotAPI)'
+        PERSONAL = 'personal', 'Telegram — личный аккаунт'
+        BOT = 'bot', 'Telegram — бот'
+        WHATSAPP = 'whatsapp', 'WhatsApp через GREEN-API'
+        MAX = 'max', 'MAX — личный аккаунт через GREEN-API'
     
     class AccountStatus(models.TextChoices):
         ACTIVE = 'active', 'Активен'
@@ -98,8 +101,33 @@ class TelegramAccount(models.Model):
         blank=True,
         verbose_name="Username бота"
     )
+    bridge_url = models.CharField(
+        max_length=500,
+        null=True,
+        blank=True,
+        help_text="URL JGET bridge для отправки ответа; поддерживает {question_id}",
+    )
+    bridge_secret = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Общий секрет для HMAC-подписи запросов между ботом и CRM",
+    )
     
     # Метаданные
+    # Provider API credentials for webhook-based integrations.
+    access_token = models.TextField(null=True, blank=True)
+    webhook_secret = models.CharField(max_length=255, null=True, blank=True)
+    webhook_verify_token = models.CharField(max_length=255, null=True, blank=True)
+    app_secret = models.CharField(max_length=255, null=True, blank=True)
+    phone_number_id = models.CharField(max_length=100, null=True, blank=True, db_index=True)
+    business_account_id = models.CharField(max_length=100, null=True, blank=True)
+    api_version = models.CharField(max_length=32, default='v23.0', blank=True)
+    green_api_instance_id = models.CharField(max_length=100, null=True, blank=True, db_index=True)
+    green_api_token = models.TextField(null=True, blank=True)
+    green_webhook_token = models.CharField(max_length=255, null=True, blank=True)
+    green_api_url = models.URLField(max_length=500, default='https://api.green-api.com', blank=True)
+    green_media_url = models.URLField(max_length=500, default='https://media.green-api.com', blank=True)
     telegram_user_id = models.BigIntegerField(
         null=True,
         blank=True,
@@ -114,14 +142,15 @@ class TelegramAccount(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     last_activity = models.DateTimeField(null=True, blank=True)
+    restart_requested_at = models.DateTimeField(null=True, blank=True, editable=False)
     
     # Ошибки и логи
     last_error = models.TextField(null=True, blank=True)
     error_count = models.IntegerField(default=0)
     
     class Meta:
-        verbose_name = "Telegram Аккаунт"
-        verbose_name_plural = "Telegram Аккаунты"
+        verbose_name = "Аккаунт мессенджера"
+        verbose_name_plural = "Аккаунты мессенджеров"
         indexes = [
             models.Index(fields=['status', 'account_type']),
             models.Index(fields=['telegram_user_id']),
@@ -143,16 +172,15 @@ class Chat(models.Model):
     
     # Идентификаторы
     telegram_id = models.BigIntegerField(
-        unique=True,
         db_index=True,
-        verbose_name="Telegram Chat ID"
+        verbose_name="ID чата у провайдера"
     )
     telegram_account = models.ForeignKey(
         TelegramAccount,
         on_delete=models.CASCADE,
         related_name='chats',
         db_index=True,
-        verbose_name="Telegram Аккаунт"
+        verbose_name="Аккаунт мессенджера"
     )
     
     # Информация о чате
@@ -174,6 +202,8 @@ class Chat(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     last_message_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    is_archived = models.BooleanField(default=False, db_index=True, verbose_name="В архиве")
+    is_bot = models.BooleanField(default=False, db_index=True, verbose_name="Собеседник — бот")
     
     # Дополнительные данные (JSON)
     metadata = models.JSONField(default=dict, blank=True)
@@ -184,9 +214,11 @@ class Chat(models.Model):
         indexes = [
             models.Index(fields=['telegram_account', 'last_message_at']),
             models.Index(fields=['chat_type', 'last_message_at']),
+            models.Index(fields=['chat_type', 'is_archived', 'last_message_at'], name='crm_chat_type_arch_idx'),
             models.Index(fields=['created_at']),
             # Составной индекс для частых запросов
             models.Index(fields=['telegram_account', 'unread_count', 'last_message_at']),
+            models.Index(fields=['telegram_account', 'is_archived', 'last_message_at'], name='crm_chat_account_arch_idx'),
         ]
         unique_together = [['telegram_id', 'telegram_account']]
     
@@ -203,6 +235,7 @@ class Message(models.Model):
         PHOTO = 'photo', 'Фото'
         VIDEO = 'video', 'Видео'
         VOICE = 'voice', 'Голосовое'
+        AUDIO = 'audio', 'Аудио'
         DOCUMENT = 'document', 'Документ'
         STICKER = 'sticker', 'Стикер'
         LOCATION = 'location', 'Локация'
@@ -217,9 +250,12 @@ class Message(models.Model):
     
     # Идентификаторы
     telegram_id = models.BigIntegerField(
+        null=True,
+        blank=True,
         db_index=True,
-        verbose_name="Telegram Message ID"
+        verbose_name="ID сообщения у провайдера"
     )
+    external_message_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
     chat = models.ForeignKey(
         Chat,
         on_delete=models.CASCADE,
@@ -256,7 +292,7 @@ class Message(models.Model):
     telegram_file_id = models.CharField(max_length=255, null=True, blank=True, help_text="Telegram file ID для повторного скачивания")
     
     # Временные метки
-    telegram_date = models.DateTimeField(db_index=True, verbose_name="Дата в Telegram")
+    telegram_date = models.DateTimeField(db_index=True, verbose_name="Дата сообщения")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -284,6 +320,12 @@ class Message(models.Model):
             # Уникальность сообщения в рамках чата
         ]
         unique_together = [['telegram_id', 'chat']]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['chat', 'external_message_id'],
+                name='unique_external_message_per_chat',
+            ),
+        ]
         ordering = ['-telegram_date']
     
     def __str__(self):
@@ -342,3 +384,58 @@ class ChatAssignment(models.Model):
     
     def __str__(self):
         return f"{self.chat} -> {self.operator.user.username}"
+
+class OutboundDelivery(models.Model):
+    """Durable outbox item consumed by the connector process."""
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Ожидает отправки'
+        PROCESSING = 'processing', 'Отправляется'
+        RETRY = 'retry', 'Повторная попытка'
+        SENT = 'sent', 'Отправлено'
+        FAILED = 'failed', 'Ошибка'
+
+    idempotency_key = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    chat = models.ForeignKey(Chat, on_delete=models.CASCADE, related_name='outbound_deliveries')
+    reply_to_message = models.ForeignKey(
+        Message,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='outbound_delivery_replies',
+    )
+    requested_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='requested_message_deliveries',
+    )
+    text = models.TextField(blank=True)
+    media_path = models.CharField(max_length=500, null=True, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
+    provider_message_id = models.CharField(max_length=255, null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    available_at = models.DateTimeField(default=timezone.now, db_index=True)
+    last_error = models.TextField(blank=True)
+    created_message = models.OneToOneField(
+        Message,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='outbound_delivery',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Исходящая отправка'
+        verbose_name_plural = 'Исходящие отправки'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['status', 'available_at'], name='crm_app_out_status_5a4c40_idx'),
+            models.Index(fields=['chat', 'created_at'], name='crm_app_out_chat_id_233f61_idx'),
+        ]
+
+    def __str__(self):
+        return f'OutboundDelivery {self.pk} ({self.status})'

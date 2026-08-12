@@ -1,5 +1,41 @@
 # 🔗 Integration Guide: Existing Bot with CRM
 
+## JGET support questions (implemented)
+
+The JGET bot forwards only messages created through its existing `Questions`
+workflow. Delivery is asynchronous through the JGET Celery worker and signed
+with HMAC-SHA256.
+
+1. Create an active `bot` Telegram account in Django Admin.
+2. Set `bridge_secret` to the same random secret used by JGET.
+3. Set `bridge_url` to:
+
+   ```text
+   https://bot.j-get.ru/api/crm/questions/{question_id}/reply/
+   ```
+
+4. Note the CRM Telegram account ID and configure JGET:
+
+   ```yaml
+   crm:
+     enabled: true
+     url: https://your-crm.example
+     account_id: 2
+     secret: the-same-long-random-secret
+   ```
+
+5. Apply migrations and restart the CRM web process plus the JGET app and
+   Celery worker.
+
+JGET sends questions to:
+
+```text
+POST /api/integrations/jget/<account_id>/questions/
+```
+
+CRM replies through the configured `bridge_url`. Duplicate question deliveries
+and duplicate replies with the same text are idempotent.
+
 This guide shows how to integrate your existing Telegram bot with the Omnichannel CRM system.
 
 ## 📋 Integration Options

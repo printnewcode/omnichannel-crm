@@ -8,6 +8,7 @@ from .views import (
     BotWebhookView, HealthCheckView, SystemStatusView, SystemControlView,
     SyncMessagesView, FileUploadView
 )
+from .integration_views import JgetQuestionWebhookView, MaxWebhookView, WhatsAppWebhookView
 
 router = DefaultRouter()
 router.register(r'accounts', TelegramAccountViewSet, basename='telegram-account')
@@ -20,6 +21,14 @@ urlpatterns = [
     # Webhook endpoints
     path('api/webhook/bot/', BotWebhookView.as_view(), name='bot-webhook'),
     path('api/webhook/bot/<str:token>/', BotWebhookView.as_view(), name='bot-webhook-token'),
+    path(
+        'api/integrations/jget/<int:account_id>/questions/',
+        JgetQuestionWebhookView.as_view(),
+        name='jget-question-webhook',
+    ),
+
+    path('api/integrations/whatsapp/<int:account_id>/webhook/', WhatsAppWebhookView.as_view(), name='whatsapp-webhook'),
+    path('api/integrations/max/<int:account_id>/webhook/', MaxWebhookView.as_view(), name='max-webhook'),
 
     # Health and monitoring
     path('api/health/', HealthCheckView.as_view(), name='health-check'),

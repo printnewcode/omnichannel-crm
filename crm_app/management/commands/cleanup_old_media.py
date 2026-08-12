@@ -2,8 +2,7 @@ from django.core.management.base import BaseCommand
 from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
-from django.db.models import Exists, OuterRef
-from crm_app.models import Message, ChatAssignment
+from crm_app.models import Message
 import os
 import logging
 
@@ -23,20 +22,13 @@ class Command(BaseCommand):
         dry_run = options['dry_run']
         cutoff_date = timezone.now() - timedelta(days=days)
 
-        # Подзапрос для активных чатов
-        active_chats_subquery = ChatAssignment.objects.filter(
-            chat=OuterRef('chat'),
-            is_active=True,
-            operator__is_active=True
-        )
-
+        # Без назначений активными считаются все неархивные диалоги.
+        # Очистка затрагивает только давно заархивированные переписки.
         old_messages = Message.objects.filter(
+            chat__is_archived=True,
             media_file_path__isnull=False,  # Есть файл на диске
             telegram_file_id__isnull=False,  # Есть file_id для повторного скачивания
             telegram_date__lt=cutoff_date,   # Старое сообщение
-        ).exclude(
-            # Исключить сообщения в активных чатах
-            Exists(active_chats_subquery)
         )
 
         self.stdout.write(f"Найдено {old_messages.count()} сообщений со старыми медиа")

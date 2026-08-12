@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Quick References: нейтральный фон чата</title><style>
+body{font-family:Inter,Segoe UI,Arial,sans-serif;max-width:900px;margin:0 auto;padding:40px 24px;color:#17202a;line-height:1.58;background:#f7f9fb}h1,h2,h3{line-height:1.2}section{margin:30px 0}.callout{padding:18px 20px;border-radius:14px;background:#eaf4ff;border:1px solid #cfe6ff}figure{margin:18px 0;padding:16px;border-radius:16px;background:white;box-shadow:0 8px 28px rgba(23,32,42,.08)}img{display:block;width:100%;max-height:520px;object-fit:cover;border-radius:12px}figcaption{margin-top:10px;color:#5e6b78;font-size:14px}.choice{padding:18px;border-left:4px solid #64748b;background:white;border-radius:0 12px 12px 0}pre{padding:18px;overflow:auto;border-radius:12px;color:#d9e2ec;background:#17202a}</style></head><body>
+<h1>Quick References: нейтральный фон чата</h1>
+<section class="callout"><h2>TL;DR</h2><p>У лучших мессенджерных фонов повторяемый рисунок очень малоконтрастный: он помогает визуально отделить область переписки, но не конкурирует с текстом и цветом пузырей.</p></section>
+<section><h2>Current State</h2><figure><img src="references/current-state.png" alt="Текущий нейтральный фон Omnichannel CRM"><figcaption>Реализованный собственный паттерн в темной теме CRM: фон остается нейтральным, а зеленый используется только как акцент WhatsApp. [Current]</figcaption></figure></section>
+<section><h2>Patterns</h2><p>Общий паттерн — спокойная серо-бежевая основа, редкие контурные символы, бесшовное повторение и отсутствие крупного смыслового изображения. Для Omnichannel CRM выбран собственный нейтральный SVG с пузырями, стрелкой и точками: он не копирует бренд и одинаково работает с Telegram, MAX и WhatsApp.</p></section>
+<section><h2>References</h2><h3>Тихий doodle-паттерн</h3>
+<figure><img src="references/whatsapp-neutral-doodle.png" alt="Нейтральный бежевый doodle-фон"><figcaption>WhatsApp-style reference — мягкий бежевый фон и равномерный малоконтрастный рисунок. [Web]</figcaption></figure>
+<figure><img src="references/telegram-light-doodle.png" alt="Светлый серый doodle-фон"><figcaption>Telegram-style reference — серый линейный узор без доминирующего изображения. [Web]</figcaption></figure>
+<p>Общее: небольшой масштаб элементов, много свободного пространства, низкая контрастность. В продукте снижена визуальная «игривость» и оставлены только универсальные символы общения.</p></section>
+<section class="choice"><h2>Применение в CRM</h2><p>Светлая тема: #eef1f4 и серый контур около 10% opacity. Темная тема: #11151a и белый контур около 5.5% opacity. Цвет не меняется вместе с мессенджером, поэтому переключение канала остается спокойным.</p></section>
+<section><h2>Схема</h2><pre>┌──────────────┬───────────────────────────────┐
+│ Архив       ›│  ·   [чат]      →       ·    │
+│ Диалог 1     │       сообщение              │
+│ Диалог 2     │              ответ ✓✓         │
+│ Диалог 3     │  ·        ○          [чат]    │
+└──────────────┴───────────────────────────────┘</pre></section>
+</body></html>

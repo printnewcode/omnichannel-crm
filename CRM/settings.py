@@ -5,6 +5,7 @@ Omnichannel CRM система для управления Telegram источн
 """
 
 from pathlib import Path
+from urllib.parse import urlsplit
 import os
 from dotenv import load_dotenv
 from decouple import config, Csv
@@ -21,10 +22,20 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-e(v17v9%x0+=x7hm*4x@*^)y*#_t$j)3hv5hb2q&s0p)4t-)s$')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DEBUG', False)  #config('DEBUG', default=False, cast=bool)
-LOCAL = os.getenv('LOCAL', False)  #config('LOCAL', default=False, cast=bool)
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
-DOMAIN = os.getenv('DOMAIN', '')
+DEBUG = config('DEBUG', default=False, cast=bool)
+LOCAL = config('LOCAL', default=False, cast=bool)
+def _allowed_host(value):
+    value = value.strip()
+    if not value or value == '*':
+        return value
+    parsed = urlsplit(value if '://' in value else f'//{value}')
+    return parsed.hostname or value
+
+
+ALLOWED_HOSTS = [
+    host for host in (_allowed_host(value) for value in os.getenv('ALLOWED_HOSTS', '*').split(',')) if host
+]
+DOMAIN = os.getenv('DOMAIN', '').strip().rstrip('/')
 # HOOK = os.getenv('HOOK', 'False').lower() == 'true'
 
 # Application definition
@@ -83,7 +94,7 @@ ASGI_APPLICATION = 'CRM.asgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 # MySQL 8.0+ для высоконагруженных записей
-if LOCAL.lower() == "true":
+if LOCAL:
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
@@ -94,10 +105,13 @@ else:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.mysql",
-            "NAME": os.getenv("NAME_DB"),
-            "USER": os.getenv("NAME_DB"),
-            "PASSWORD": os.getenv("PASS_DB"),
-            "HOST": "127.0.0.1",
+            "NAME": os.getenv("DB_NAME", os.getenv("NAME_DB")),
+            "USER": os.getenv("DB_USER", os.getenv("NAME_DB")),
+            "PASSWORD": os.getenv("DB_PASSWORD", os.getenv("PASS_DB")),
+            "HOST": os.getenv("DB_HOST", "127.0.0.1"),
+            "PORT": os.getenv("DB_PORT", "3306"),
+            "CONN_MAX_AGE": 60,
+            "OPTIONS": {"charset": "utf8mb4"},
         }
     }
 
@@ -172,18 +186,38 @@ REST_FRAMEWORK = {
 }
 
 
-# Django Channels
-# For shared hosting, we use polling, but keep layers for internal signal routing if needed.
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels.layers.InMemoryChannelLayer'
-    },
-}
+# Django Channels / Redis event bus.
+# Local development keeps the in-memory backend when REDIS_URL is not configured.
+REDIS_URL = config('REDIS_URL', default='').strip()
+TELEGRAM_PROXY_URL = config('TELEGRAM_PROXY_URL', default='').strip()
+if REDIS_URL:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                'hosts': [REDIS_URL],
+                'capacity': 1500,
+                'expiry': 60,
+            },
+        },
+    }
+else:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels.layers.InMemoryChannelLayer',
+        },
+    }
 
-
-# Celery is disabled for shared hosting (using Cron instead)
-CELERY_BROKER_URL = None
-CELERY_RESULT_BACKEND = None
+# Celery uses the same Redis instance on VPS. Eager mode keeps local/tests working
+# without requiring a broker and preserves the existing synchronous behaviour.
+CELERY_BROKER_URL = REDIS_URL or 'memory://'
+CELERY_RESULT_BACKEND = REDIS_URL or 'cache+memory://'
+CELERY_TASK_ALWAYS_EAGER = not bool(REDIS_URL)
+CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_RESULT_EXPIRES = 3600
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
 
 # CORS settings
@@ -254,19 +288,16 @@ LOGS_DIR = BASE_DIR / 'logs'
 LOGS_DIR.mkdir(exist_ok=True)
 
 
-# HTTPS and Security Settings
-# Detect if we're behind a proxy/load balancer that sets X-Forwarded-Proto
-SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-
 # HTTPS redirects and security
-SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=False, cast=bool)
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=not DEBUG, cast=bool)
 SECURE_HSTS_SECONDS = config('SECURE_HSTS_SECONDS', default=31536000, cast=int)  # 1 year
 SECURE_HSTS_INCLUDE_SUBDOMAINS = config('SECURE_HSTS_INCLUDE_SUBDOMAINS', default=True, cast=bool)
 SECURE_HSTS_PRELOAD = config('SECURE_HSTS_PRELOAD', default=True, cast=bool)
 
 # Cookies and sessions
-SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', 'False').lower() == 'true'
-CSRF_COOKIE_SECURE = os.getenv('CSRF_COOKIE_SECURE', 'False').lower() == 'true'
+SESSION_COOKIE_SECURE = config('SESSION_COOKIE_SECURE', default=not DEBUG, cast=bool)
+CSRF_COOKIE_SECURE = config('CSRF_COOKIE_SECURE', default=not DEBUG, cast=bool)
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = 'Lax'
@@ -275,7 +306,7 @@ CSRF_COOKIE_SAMESITE = 'Lax'
 # Security headers (additional protection beyond nginx)
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_BROWSER_XSS_FILTER = True
-X_FRAME_OPTIONS = 'SAMEORIGIN'
+X_FRAME_OPTIONS = 'DENY'
 
 # CORS settings for HTTPS
 cors_env = os.getenv('CORS_ALLOWED_ORIGINS', '')

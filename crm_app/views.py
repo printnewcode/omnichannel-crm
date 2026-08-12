@@ -2,24 +2,31 @@
 REST API Views для CRM системы
 """
 import asyncio
+import errno
 import logging
+import os
+import uuid
+from pathlib import Path
 from typing import Optional
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.conf import settings
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from django.core.exceptions import SuspiciousFileOperation
+from django.utils.text import get_valid_filename
 from django.shortcuts import redirect
 from .models import (
-    TelegramAccount, Chat, Message, Operator, ChatAssignment
+    TelegramAccount, Chat, Message
 )
 from .serializers import (
     TelegramAccountSerializer, ChatSerializer, MessageSerializer,
-    OperatorSerializer, ChatAssignmentSerializer, SendMessageSerializer
+    SendMessageSerializer
 )
 from .services.telegram_client_manager import TelegramClientManager
 from .services.message_router import MessageRouter
@@ -27,6 +34,51 @@ from .services.health_monitor import HealthMonitor
 from .tasks import process_incoming_message
 
 logger = logging.getLogger(__name__)
+
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+MAX_ATTACHMENTS_PER_MESSAGE = 10
+
+
+def _enqueue_message_batch(*, chat, text, media_paths, requested_by, reply_to_message=None):
+    """Create one provider-neutral batch; providers consume each attachment reliably."""
+    from .services.outbound_delivery import enqueue_delivery
+
+    paths = list(media_paths or [])
+    with transaction.atomic():
+        if not paths:
+            return [enqueue_delivery(
+                chat=chat,
+                text=text,
+                reply_to_message=reply_to_message,
+                requested_by=requested_by,
+            )]
+        return [
+            enqueue_delivery(
+                chat=chat,
+                text=text if index == 0 else '',
+                media_path=media_path,
+                reply_to_message=reply_to_message if index == 0 else None,
+                requested_by=requested_by,
+            )
+            for index, media_path in enumerate(paths)
+        ]
+
+
+def _delivery_response(deliveries):
+    return {
+        'status': 'pending',
+        'delivery_id': deliveries[0].id,
+        'delivery_ids': [delivery.id for delivery in deliveries],
+        'deliveries': [
+            {
+                'id': delivery.id,
+                'idempotency_key': str(delivery.idempotency_key),
+                'media_path': delivery.media_path,
+            }
+            for delivery in deliveries
+        ],
+        'idempotency_key': str(deliveries[0].idempotency_key),
+    }
 
 
 class TelegramAccountViewSet(viewsets.ModelViewSet):
@@ -315,369 +367,147 @@ class SystemControlView(APIView):
 
 
 class ChatViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    ViewSet для просмотра чатов (только чтение)
-    """
+    """Общий список диалогов для всех авторизованных операторов."""
+
     serializer_class = ChatSerializer
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def get_queryset(self):
-        """Получить только чаты назначенные оператору"""
-        assigned_only = self.request.query_params.get('assigned_only') in ['1', 'true', 'yes']
-        if (self.request.user.is_staff or self.request.user.is_superuser) and not assigned_only:
-            # Администраторы видят все чаты (если не запрошен фильтр assigned_only)
-            return Chat.objects.select_related('telegram_account').order_by('-last_message_at')
-
-        try:
-            operator = Operator.objects.get(user=self.request.user, is_active=True)
-            assignments = ChatAssignment.objects.filter(
-                operator=operator,
-                is_active=True
-            ).select_related('chat', 'chat__telegram_account')
-
-            return Chat.objects.filter(
-                assignment__in=assignments
-            ).select_related('telegram_account').order_by('-last_message_at')
-        except Operator.DoesNotExist:
-            return Chat.objects.none()
-    
-    @action(detail=True, methods=['post'])
-    def assign(self, request, pk=None):
-        """Назначить чат оператору"""
-        chat = self.get_object()
-        
-        try:
-            operator = Operator.objects.get(user=request.user, is_active=True)
-        except Operator.DoesNotExist:
-            return Response(
-                {'error': 'User is not an operator'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        # Проверка лимита чатов
-        current_count = ChatAssignment.objects.filter(
-            operator=operator,
-            is_active=True
-        ).count()
-        
-        if current_count >= operator.max_chats:
-            return Response(
-                {'error': f'Maximum chats limit reached ({operator.max_chats})'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Создание назначения
-        assignment, created = ChatAssignment.objects.get_or_create(
-            chat=chat,
-            defaults={
-                'operator': operator,
-                'is_active': True
-            }
+        # Group messages remain persisted, but are intentionally hidden from the
+        # operator workspace until group-chat UX is ready.
+        queryset = Chat.objects.select_related('telegram_account').filter(
+            chat_type=Chat.ChatType.PRIVATE,
+            is_bot=False,
         )
-        
-        if not created:
-            assignment.is_active = True
-            assignment.unassigned_at = None
-            assignment.save()
-        
-        operator.current_chats = ChatAssignment.objects.filter(
-            operator=operator,
-            is_active=True
-        ).count()
-        operator.save(update_fields=['current_chats'])
-        
-        return Response({
-            'status': 'assigned',
-            'assignment_id': assignment.id
-        }, status=status.HTTP_200_OK)
-    
+        archived = self.request.query_params.get('archived')
+        if archived in {'1', 'true', 'yes'}:
+            queryset = queryset.filter(is_archived=True)
+        elif archived in {'0', 'false', 'no'}:
+            queryset = queryset.filter(is_archived=False)
+        return queryset.order_by('-last_message_at')
+
     @action(detail=True, methods=['post'])
-    def unassign(self, request, pk=None):
-        """Снять назначение чата с оператора"""
+    def archive(self, request, pk=None):
         chat = self.get_object()
-        
-        try:
-            operator = Operator.objects.get(user=request.user, is_active=True)
-        except Operator.DoesNotExist:
-            return Response(
-                {'error': 'User is not an operator'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        try:
-            assignment = ChatAssignment.objects.get(
-                chat=chat,
-                operator=operator,
-                is_active=True
-            )
-            assignment.is_active = False
-            assignment.unassigned_at = timezone.now()
-            assignment.save()
-            
-            operator.current_chats = ChatAssignment.objects.filter(
-                operator=operator,
-                is_active=True
-            ).count()
-            operator.save(update_fields=['current_chats'])
-            
-            return Response({'status': 'unassigned'}, status=status.HTTP_200_OK)
-        except ChatAssignment.DoesNotExist:
-            return Response(
-                {'error': 'Chat is not assigned to this operator'},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        chat.is_archived = True
+        chat.save(update_fields=['is_archived', 'updated_at'])
+        return Response({'status': 'archived', 'is_archived': True})
+
+    @action(detail=True, methods=['post'])
+    def unarchive(self, request, pk=None):
+        chat = self.get_object()
+        chat.is_archived = False
+        chat.save(update_fields=['is_archived', 'updated_at'])
+        return Response({'status': 'active', 'is_archived': False})
 
     @action(detail=True, methods=['post'])
     def mark_as_read(self, request, pk=None):
-        """Сбросить счетчик непрочитанных сообщений"""
         chat = self.get_object()
         chat.unread_count = 0
         chat.save(update_fields=['unread_count'])
-        return Response({'status': 'success'}, status=status.HTTP_200_OK)
+        return Response({'status': 'success'})
 
     @action(detail=True, methods=['post'])
     def send_message(self, request, pk=None):
-        """Отправить новое сообщение в чат"""
         chat = self.get_object()
-
         serializer = SendMessageSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        text = serializer.validated_data['text']
-        media_path = serializer.validated_data.get('media_path')
-
-        # Проверка, что чат назначен оператору
-        try:
-            operator = Operator.objects.get(user=request.user, is_active=True)
-            ChatAssignment.objects.get(
-                chat=chat,
-                operator=operator,
-                is_active=True
-            )
-        except (Operator.DoesNotExist, ChatAssignment.DoesNotExist):
-            return Response(
-                {'error': 'Chat is not assigned to this operator'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        # Отправка сообщения через MessageRouter
-        router = MessageRouter()
-        try:
-            telegram_message_id = router.send_message(chat, text, media_path)
-
-            if telegram_message_id:
-                # Создание записи об отправленном сообщении
-                outgoing_message = router.create_outgoing_message(
-                    chat=chat,
-                    text=text,
-                    telegram_message_id=telegram_message_id,
-                    message_type='text' if not media_path else 'photo',
-                    media_file_path=media_path
-                )
-
-                # Отправка обновления через WebSocket
-                from channels.layers import get_channel_layer
-                from asgiref.sync import async_to_sync
-
-                channel_layer = get_channel_layer()
-                async_to_sync(channel_layer.group_send)(
-                    f"operator_{operator.user.id}",
-                    {
-                        'type': 'new_message',
-                        'message': MessageSerializer(outgoing_message).data
-                    }
-                )
-
-                return Response({
-                    'status': 'sent',
-                    'message_id': outgoing_message.id,
-                    'telegram_message_id': telegram_message_id
-                }, status=status.HTTP_201_CREATED)
-            else:
-                return Response(
-                    {'error': 'Failed to send message'},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-        except Exception as e:
-            logger.exception(f"Error sending message: {e}")
-            return Response(
-                {'error': 'Internal server error'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        serializer.is_valid(raise_exception=True)
+        deliveries = _enqueue_message_batch(
+            chat=chat,
+            text=serializer.validated_data.get('text', ''),
+            media_paths=serializer.validated_data.get('media_paths', []),
+            requested_by=request.user,
+        )
+        return Response(_delivery_response(deliveries), status=status.HTTP_202_ACCEPTED)
 
 
 class MessageViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    ViewSet для просмотра и отправки сообщений
-    """
+    """Просмотр сообщений и ответы без ручного назначения диалогов."""
+
     serializer_class = MessageSerializer
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def get_queryset(self):
-        """Получить сообщения из чатов назначенных оператору"""
-        if self.request.user.is_staff or self.request.user.is_superuser:
-            # Администраторы видят все сообщения
-            return Message.objects.select_related('chat', 'chat__telegram_account', 'reply_to_message').order_by('-telegram_date')
+        return Message.objects.filter(
+            chat__chat_type=Chat.ChatType.PRIVATE,
+            chat__is_bot=False,
+        ).select_related(
+            'chat', 'chat__telegram_account', 'reply_to_message'
+        ).order_by('-telegram_date')
 
-        try:
-            operator = Operator.objects.get(user=self.request.user, is_active=True)
-            assigned_chat_ids = ChatAssignment.objects.filter(
-                operator=operator,
-                is_active=True
-            ).values_list('chat_id', flat=True)
-
-            return Message.objects.filter(
-                chat_id__in=assigned_chat_ids
-            ).select_related('chat', 'chat__telegram_account', 'reply_to_message').order_by('-telegram_date')
-        except Operator.DoesNotExist:
-            return Message.objects.none()
-    
     def get_queryset_by_chat(self, chat_id):
-        """Получить сообщения конкретного чата"""
-        # Если администратор - возвращаем без проверок назначения
-        if self.request.user.is_staff or self.request.user.is_superuser:
-             return Message.objects.filter(chat_id=chat_id).select_related(
-                'chat', 'chat__telegram_account', 'reply_to_message'
-            ).order_by('-telegram_date')
+        return self.get_queryset().filter(chat_id=chat_id)
 
-        # Проверка, что чат назначен оператору
-        try:
-            operator = Operator.objects.get(user=self.request.user, is_active=True)
-            ChatAssignment.objects.get(
-                chat_id=chat_id,
-                operator=operator,
-                is_active=True
-            )
-            return Message.objects.filter(chat_id=chat_id).select_related(
-                'chat', 'chat__telegram_account', 'reply_to_message'
-            ).order_by('-telegram_date')
-        except (Operator.DoesNotExist, ChatAssignment.DoesNotExist):
-            return Message.objects.none()
-    
     @action(detail=False, methods=['get'])
     def by_chat(self, request):
-        """Получить сообщения по chat_id"""
         chat_id = request.query_params.get('chat_id')
         if not chat_id:
-            return Response(
-                {'error': 'chat_id is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
+            return Response({'error': 'chat_id is required'}, status=status.HTTP_400_BAD_REQUEST)
         messages = self.get_queryset_by_chat(chat_id)
+        search_query = (request.query_params.get('search') or '').strip()
+        if search_query:
+            messages = messages.filter(
+                Q(text__icontains=search_query) | Q(media_caption__icontains=search_query)
+            )
         page = self.paginate_queryset(messages)
         if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-        
-        serializer = self.get_serializer(messages, many=True)
-        return Response(serializer.data)
-    
+            return self.get_paginated_response(self.get_serializer(page, many=True).data)
+        return Response(self.get_serializer(messages, many=True).data)
+
     @action(detail=True, methods=['post'])
     def reply(self, request, pk=None):
-        """Отправить ответ на сообщение"""
         message = self.get_object()
-        
         serializer = SendMessageSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        text = serializer.validated_data['text']
-        media_path = serializer.validated_data.get('media_path')
-        
-        # Проверка, что чат назначен оператору
-        try:
-            operator = Operator.objects.get(user=request.user, is_active=True)
-            ChatAssignment.objects.get(
-                chat=message.chat,
-                operator=operator,
-                is_active=True
-            )
-        except (Operator.DoesNotExist, ChatAssignment.DoesNotExist):
-            return Response(
-                {'error': 'Chat is not assigned to this operator'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        # Отправка ответа через MessageRouter
-        router = MessageRouter()
-        try:
-            telegram_message_id = router.send_reply(message, text, media_path)
-            
-            if telegram_message_id:
-                # Создание записи об отправленном сообщении
-                outgoing_message = router.create_outgoing_message(
-                    chat=message.chat,
-                    text=text,
-                    telegram_message_id=telegram_message_id,
-                    reply_to_message=message,
-                    message_type='text' if not media_path else 'photo',
-                    media_file_path=media_path
-                )
-                
-                # Отправка обновления через WebSocket
-                from channels.layers import get_channel_layer
-                from asgiref.sync import async_to_sync
-                
-                channel_layer = get_channel_layer()
-                async_to_sync(channel_layer.group_send)(
-                    f"operator_{operator.user.id}",
-                    {
-                        'type': 'new_message',
-                        'message': {
-                            'id': outgoing_message.id,
-                            'telegram_id': outgoing_message.telegram_id,
-                            'chat_id': outgoing_message.chat.id,
-                            'text': outgoing_message.text,
-                            'message_type': outgoing_message.message_type,
-                            'status': outgoing_message.status,
-                            'is_outgoing': True,
-                            'telegram_date': outgoing_message.telegram_date.isoformat(),
-                        }
-                    }
-                )
-                
-                return Response({
-                    'status': 'sent',
-                    'message_id': outgoing_message.id,
-                    'telegram_message_id': telegram_message_id
-                }, status=status.HTTP_201_CREATED)
-            else:
-                return Response(
-                    {'error': 'Failed to send message'},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-        except Exception as e:
-            logger.exception(f"Error sending reply: {e}")
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        serializer.is_valid(raise_exception=True)
+        deliveries = _enqueue_message_batch(
+            chat=message.chat,
+            text=serializer.validated_data.get('text', ''),
+            media_paths=serializer.validated_data.get('media_paths', []),
+            reply_to_message=message,
+            requested_by=request.user,
+        )
+        return Response(_delivery_response(deliveries), status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=['get'])
     def download_media(self, request, pk=None):
-        """Скачать медиа файл по запросу"""
         message = self.get_object()
 
-        # Если файл уже скачан - вернуть его
-        if message.media_file_path:
-            return redirect(f'/media/{message.media_file_path}')
+        def ready(path):
+            name = (message.metadata or {}).get('original_filename') or Path(path).name
+            return Response({
+                'status': 'ready',
+                'media_url': request.build_absolute_uri(settings.MEDIA_URL + path),
+                'file_name': name,
+            })
 
-        # Если файл не скачан - скачать по message.telegram_id
-        # Проверяем что это медиа-сообщение без файла
-        if message.message_type and message.message_type != 'text' and not message.media_file_path:
-            try:
-                manager = TelegramClientManager()
-                # Используем sync версию метода
-                media_path = manager.download_media_by_message_id_sync(message)
-                if media_path:
-                    return redirect(f'/media/{media_path}')
-            except Exception as e:
-                logger.exception(f"Error downloading media: {e}")
-                return Response({'error': 'Failed to download media'}, status=500)
-
-        return Response({'error': 'Media not available'}, status=404)
+        if message.media_file_path and default_storage.exists(message.media_file_path):
+            return ready(message.media_file_path)
+        if not message.message_type or message.message_type == Message.MessageType.TEXT:
+            return Response(
+                {'error': 'В сообщении нет файла.', 'code': 'media_not_available'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        try:
+            account = message.chat.telegram_account
+            if account.account_type in {TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX}:
+                from .services.provider_media import download_green_api_media
+                media_path = download_green_api_media(message)
+            else:
+                media_path = TelegramClientManager().download_media_by_message_id_sync(message)
+            if media_path:
+                return ready(media_path)
+        except ValueError as exc:
+            return Response({'error': str(exc), 'code': 'media_rejected'}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        except Exception as exc:
+            logger.exception('Error downloading media for message %s', message.id)
+            return Response(
+                {'error': f'Не удалось скачать файл у провайдера: {exc}', 'code': 'provider_download_failed'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(
+            {'error': 'Файл больше недоступен у провайдера.', 'code': 'media_not_available'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
 
 class BotWebhookView(APIView):
@@ -761,12 +591,17 @@ class BotWebhookView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
+            # Каналы не входят в операторскую очередь: только личные чаты и группы.
+            incoming_chat_type = chat_data.get('type', 'private')
+            if incoming_chat_type not in {'private', 'group', 'supergroup'}:
+                return Response({'status': 'ignored'}, status=status.HTTP_200_OK)
+
             # Создание или обновление чата
             chat, created = Chat.objects.get_or_create(
                 telegram_id=chat_telegram_id,
                 telegram_account=account,
                 defaults={
-                    'chat_type': chat_data.get('type', 'private'),
+                    'chat_type': incoming_chat_type,
                     'title': chat_data.get('title'),
                     'username': chat_data.get('username'),
                     'first_name': chat_data.get('first_name'),
@@ -888,80 +723,56 @@ class BotWebhookView(APIView):
 
 
 class FileUploadView(APIView):
-    """
-    Загрузка файлов для отправки в сообщениях
-    """
+    """Accept any file extension and preserve its user-facing filename."""
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        """Загрузка файла"""
+        uploaded_file = request.FILES.get('file')
+        if not uploaded_file:
+            return Response({'error': 'Выберите файл.', 'code': 'file_missing'}, status=400)
+        if uploaded_file.size == 0:
+            return Response({'error': 'Файл пустой.', 'code': 'file_empty'}, status=400)
+        if uploaded_file.size > MAX_UPLOAD_BYTES:
+            return Response({
+                'error': 'Файл слишком большой. Максимальный размер — 100 МБ.',
+                'code': 'file_too_large',
+                'limit_bytes': MAX_UPLOAD_BYTES,
+                'actual_bytes': uploaded_file.size,
+            }, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+
         try:
-            uploaded_file = request.FILES.get('file')
-            if not uploaded_file:
-                return Response(
-                    {'error': 'No file provided'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            original_name = Path(uploaded_file.name or 'file').name
+            safe_name = get_valid_filename(original_name)
+            if not safe_name or safe_name in {'.', '..'}:
+                return Response({'error': 'Некорректное имя файла.', 'code': 'invalid_filename'}, status=400)
+            if len(safe_name) > 220:
+                stem, extension = os.path.splitext(safe_name)
+                safe_name = stem[:max(1, 220 - len(extension))] + extension[:32]
 
-            # Валидация размера файла (макс 50MB)
-            if uploaded_file.size > 50 * 1024 * 1024:
-                return Response(
-                    {'error': 'File too large. Maximum size is 50MB'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Валидация типа файла
-            allowed_types = [
-                'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-                'video/mp4', 'video/avi', 'video/mov', 'video/mkv',
-                'audio/mp3', 'audio/wav', 'audio/ogg',
-                'application/pdf', 'application/zip', 'application/x-rar-compressed'
-            ]
-
-            if uploaded_file.content_type not in allowed_types:
-                # Дополнительная проверка по расширению для файлов без правильного content-type
-                allowed_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.avi', '.mov', '.mkv', '.mp3', '.wav', '.ogg', '.pdf', '.zip', '.rar']
-                file_ext = '.' + uploaded_file.name.split('.')[-1].lower() if '.' in uploaded_file.name else ''
-
-                if file_ext not in allowed_extensions:
-                    return Response(
-                        {'error': f'File type not allowed. Allowed types: {", ".join(allowed_types)}'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-
-            # Создание уникального имени файла
-            import uuid
-            import os
-            from datetime import datetime
-
-            today = datetime.now().strftime('%Y/%m/%d')
-            file_extension = os.path.splitext(uploaded_file.name)[1]
-            unique_filename = f"{uuid.uuid4()}{file_extension}"
-
-            # Путь для сохранения
-            file_path = f"uploads/{today}/{unique_filename}"
-
-            # Сохранение файла
-            saved_path = default_storage.save(file_path, ContentFile(uploaded_file.read()))
-
-            # Получение полного пути для доступа
-            full_path = os.path.join(settings.MEDIA_ROOT, saved_path)
-
+            today = timezone.localdate().strftime('%Y/%m/%d')
+            file_path = f'uploads/{today}/{uuid.uuid4().hex}/{safe_name}'
+            saved_path = default_storage.save(file_path, uploaded_file)
             return Response({
                 'file_path': saved_path,
                 'file_url': request.build_absolute_uri(settings.MEDIA_URL + saved_path),
-                'file_name': uploaded_file.name,
+                'file_name': original_name,
                 'file_size': uploaded_file.size,
-                'content_type': uploaded_file.content_type
+                'content_type': uploaded_file.content_type or 'application/octet-stream',
             }, status=status.HTTP_201_CREATED)
-
-        except Exception as e:
-            logger.exception(f"Error uploading file: {e}")
-            return Response(
-                {'error': 'File upload failed'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
+        except SuspiciousFileOperation:
+            logger.warning('Rejected suspicious upload filename %r', uploaded_file.name)
+            return Response({'error': 'Некорректное или небезопасное имя файла.', 'code': 'invalid_filename'}, status=400)
+        except PermissionError:
+            logger.exception('Upload directory is not writable')
+            return Response({'error': 'Сервер не может записать файл. Проверьте права на каталог media.', 'code': 'storage_permission_denied'}, status=507)
+        except OSError as exc:
+            logger.exception('Storage error while uploading file')
+            if exc.errno == errno.ENOSPC:
+                return Response({'error': 'На сервере закончилось свободное место.', 'code': 'storage_full'}, status=507)
+            return Response({'error': 'Ошибка файлового хранилища. Повторите попытку.', 'code': 'storage_error'}, status=507)
+        except Exception:
+            logger.exception('Unexpected file upload error')
+            return Response({'error': 'Не удалось загрузить файл из-за внутренней ошибки.', 'code': 'upload_failed'}, status=500)
 
 class SyncMessagesView(APIView):
     """
@@ -971,21 +782,7 @@ class SyncMessagesView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        try:
-            from .services.telegram_client_manager import TelegramClientManager
-            manager = TelegramClientManager()
-            
-            logger.info(f"SyncMessagesView: Triggering sync for user {request.user.id}")
-            # Запускаем синхронизацию всех активных аккаунтов в фоновом managed loop
-            manager.sync_all_active_sync()
-            
-            return Response({
-                'status': 'sync_triggered',
-                'timestamp': timezone.now().isoformat()
-            }, status=status.HTTP_200_OK)
-        except Exception as e:
-            logger.exception(f"Error in SyncMessagesView: {e}")
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        return Response(
+            {'status': 'disabled', 'detail': 'Synchronization is managed by the connector process'},
+            status=status.HTTP_410_GONE,
+        )
