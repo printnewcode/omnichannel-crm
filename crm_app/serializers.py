@@ -18,7 +18,9 @@ class TelegramAccountSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'account_type', 'account_type_display', 'status', 'status_display',
             'phone_number', 'api_id', 'api_hash', 'session_string',
-            'bot_token', 'bot_username',
+            'bot_token', 'bot_username', 'bridge_url', 'bridge_secret',
+            'green_api_instance_id', 'green_api_token', 'green_webhook_token',
+            'green_api_url', 'green_media_url',
             'telegram_user_id', 'first_name', 'last_name', 'username',
             'created_at', 'updated_at', 'last_activity',
             'last_error', 'error_count'
@@ -31,6 +33,9 @@ class TelegramAccountSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'session_string': {'write_only': True},
             'bot_token': {'write_only': True},
+            'bridge_secret': {'write_only': True},
+            'green_api_token': {'write_only': True},
+            'green_webhook_token': {'write_only': True},
             'api_hash': {'write_only': True}
         }
 
@@ -50,12 +55,12 @@ class ChatSerializer(serializers.ModelSerializer):
             'id', 'telegram_id', 'telegram_account', 'telegram_account_name',
             'chat_type', 'chat_type_display', 'title', 'username',
             'first_name', 'last_name',
-            'message_count', 'unread_count',
+            'message_count', 'unread_count', 'is_archived', 'is_bot',
             'created_at', 'updated_at', 'last_message_at',
             'last_message_preview', 'last_message_data', 'metadata'
         ]
         read_only_fields = [
-            'message_count', 'unread_count', 'created_at', 'updated_at', 'last_message_at'
+            'message_count', 'unread_count', 'is_archived', 'is_bot', 'created_at', 'updated_at', 'last_message_at'
         ]
     
     def get_last_message_preview(self, obj):
@@ -71,7 +76,7 @@ class ChatSerializer(serializers.ModelSerializer):
         last_message = obj.messages.first()
         if last_message:
             return {
-                'telegram_date': last_message.telegram_date,
+                'telegram_date': last_message.telegram_date.isoformat(),
                 'is_outgoing': last_message.is_outgoing
             }
         return None
@@ -84,15 +89,16 @@ class MessageSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     chat_title = serializers.CharField(source='chat.title', read_only=True)
     reply_to_preview = serializers.SerializerMethodField()
+    media_file_name = serializers.SerializerMethodField()
     
     class Meta:
         model = Message
         fields = [
-            'id', 'telegram_id', 'chat', 'chat_title',
+            'id', 'telegram_id', 'external_message_id', 'chat', 'chat_title',
             'message_type', 'message_type_display', 'status', 'status_display',
             'text', 'is_outgoing',
             'from_user_id', 'from_user_name', 'from_user_username',
-            'media_file_id', 'media_file_path', 'media_caption',
+            'media_file_id', 'media_file_path', 'media_file_name', 'media_caption',
             'telegram_date', 'created_at', 'updated_at',
             'reply_to_message_id', 'reply_to_message', 'reply_to_preview',
             'metadata'
@@ -101,6 +107,15 @@ class MessageSerializer(serializers.ModelSerializer):
             'telegram_date', 'created_at', 'updated_at'
         ]
     
+    def get_media_file_name(self, obj):
+        """Return a user-facing original filename when it is known."""
+        original = (obj.metadata or {}).get('original_filename')
+        if original:
+            return original
+        if obj.media_file_path:
+            from pathlib import Path
+            return Path(obj.media_file_path).name
+        return None
     def get_reply_to_preview(self, obj):
         """Получить превью сообщения на которое отвечают"""
         if obj.reply_to_message:
@@ -141,13 +156,22 @@ class ChatAssignmentSerializer(serializers.ModelSerializer):
 
 
 class SendMessageSerializer(serializers.Serializer):
-    """Serializer для отправки сообщения"""
-    
+    """Validate a text message with up to ten attachments."""
+
     text = serializers.CharField(max_length=4096, required=False, allow_blank=True)
     media_path = serializers.CharField(max_length=500, required=False, allow_null=True)
-    
+    media_paths = serializers.ListField(
+        child=serializers.CharField(max_length=500),
+        required=False,
+        allow_empty=True,
+        max_length=10,
+    )
+
     def validate(self, data):
-        """Валидация: должен быть текст или медиа"""
-        if not data.get('text') and not data.get('media_path'):
-            raise serializers.ValidationError("Either text or media_path is required")
+        paths = list(data.get('media_paths') or [])
+        if data.get('media_path') and not paths:
+            paths = [data['media_path']]
+        data['media_paths'] = paths
+        if not data.get('text') and not paths:
+            raise serializers.ValidationError('Введите текст или прикрепите хотя бы один файл.')
         return data

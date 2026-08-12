@@ -1,117 +1,89 @@
-# Omnichannel CRM System
+# Omnichannel CRM
 
-Omnichannel CRM system for collecting messages from Telegram and responding from a single web interface. Adapted for deployment on Beget Shared Hosting.
+Omnichannel CRM — единый веб-интерфейс для приема и отправки сообщений из Telegram, WhatsApp и MAX. Все авторизованные операторы видят одну общую очередь без ручного назначения чатов. CRM сохраняет личные диалоги и группы, но в текущем web-интерфейсе показывает только личные диалоги. Оператор может отвечать с цитированием исходного сообщения и убирать завершенные переписки в общий архив. Поиск внутри выбранной переписки выполняется на сервере и охватывает текст сообщений и подписи вложений.
 
-## Tech Stack
+## Что поддерживается
 
-- **Backend**: Python 3.12+, Django 5.1+, Django REST Framework
-- **Database**: MySQL 8.0+
-- **Telegram**: Telethon (personal accounts) + Bot API (bots)
-- **Real-time**: AJAX Polling (optimized for Shared Hosting)
-- **Background Tasks**: Cron (replaces Celery/Redis)
-- **Deployment**: Passenger WSGI
+| Канал | Прием | Ответ из CRM | Способ подключения |
+| --- | --- | --- | --- |
+| Telegram, личные аккаунты | Да | Да | Постоянное соединение Telethon в отдельном connector-сервисе |
+| Telegram, существующий бот | Да | Да | Подписанный HTTP bridge между ботом и CRM |
+| WhatsApp через GREEN-API | Да, текст и медиа | Да, текст и медиа | GREEN-API Webhook Endpoint и HTTP API |
+| MAX, личный аккаунт через GREEN-API | Да, текст и медиа | Да, текст и медиа | GREEN-API Webhook Endpoint и HTTP API |
 
-## Key Features
+Входящие сообщения сохраняются идемпотентно, то есть повторная доставка от провайдера не должна создавать дубли. Исходящие ответы сначала попадают в надежную очередь в базе данных, затем отправляются connector-сервисом или Celery worker с повторными попытками при временных ошибках.
 
-- ✅ Multiple Telegram accounts (Personal & Bot)
-- ✅ AJAX Polling for "real-time" updates (no WebSockets needed)
-- ✅ Cron-based Telegram synchronization
-- ✅ Integration with existing bots via webhook
-- ✅ Media file downloads
+Интерфейс поддерживает emoji и до 10 вложений за одну отправку. Разрешены любые расширения файлов, исходные имена сохраняются; SVG и другие активные форматы передаются как документы. Лимит одного файла в CRM — 100 МБ.
 
-## Getting Started (Local Setup)
+## Как устроен проект
 
-### 1. Prerequisites
-- Python 3.12+
-- MySQL (optional, SQLite is used by default for local development)
+- **Django + Django REST Framework** — бизнес-логика, API, админка и хранение данных.
+- **Daphne + Django Channels** — ASGI-сервер и мгновенное обновление интерфейса через WebSocket.
+- **Telethon connector** — отдельный постоянно работающий процесс для личных аккаунтов Telegram. Он держит соединения, принимает события, отправляет ответы и делает периодическую сверку истории.
+- **Celery + Redis** — фоновые задачи, очередь и межпроцессные события.
+- **MySQL** — основная база данных для Docker-режима и production.
+- **Nginx на VPS** — HTTPS и проксирование HTTP/WebSocket к контейнеру `web`.
 
-### 2. Installation
-1. Clone the repository:
-   ```bash
-   git clone <repository-url>
-   cd omnichannel-crm
-   ```
+Браузер не опрашивает Telegram напрямую. Новое сообщение приходит через постоянное соединение или webhook, сохраняется в базе и сразу публикуется в интерфейс. Редкая фоновая сверка читает только базу CRM и нужна как страховка для UI после переподключения.
 
-2. Create and activate a virtual environment:
-   ```bash
-   python -m venv venv
-   # On Windows:
-   venv\Scripts\activate
-   # On Linux/macOS:
-   source venv/bin/activate
-   ```
+## Запуск
 
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+Рекомендуемый локальный запуск теперь выполняется через Docker Compose из корня проекта:
 
-### 3. Configuration
-1. Copy the example environment file:
-   ```bash
-   cp .env.example .env
-   ```
-2. Edit `.env` and set `LOCAL=True` for SQLite or configure MySQL credentials. Also set `SECRET_KEY`.
+```bash
+docker compose up --build
+```
 
-### 4. Database & Admin
-1. Run migrations:
-   ```bash
-   python manage.py migrate
-   ```
-2. Create a superuser to access the admin panel:
-   ```bash
-   python manage.py createsuperuser
-   ```
+После запуска CRM доступна по адресу `http://127.0.0.1:8000/`, админка — `http://127.0.0.1:8000/admin/`.
 
-### 5. Running the Application
-1. Start the development server:
-   ```bash
-   python manage.py runserver
-   ```
-2. In a separate terminal, run the Telegram sync command:
-   ```bash
-   python manage.py sync_telegram
-   ```
+Compose поднимает все нужные процессы: `db`, `redis`, `migrate`, `web`, `connector`, `worker`. Это ближе к production и убирает необходимость вручную открывать несколько терминалов.
 
-Access the admin panel at `http://127.0.0.1:8000/admin/`.
+Подробная локальная настройка описана в [SETUP.md](SETUP.md). Production-развертывание на Linux VPS описано в [deploy/README.md](deploy/README.md).
 
-## Deployment on Beget Shared Hosting
+## Очередь диалогов
 
-### 1. File Preparation
-Upload all files to your Beget site root via SFTP.
+- Ручное назначение оператору не требуется: новые личные диалоги сразу появляются у всех авторизованных пользователей CRM. Групповые сообщения и диалоги с ботами сохраняются в БД, но временно скрыты в web-интерфейсе.
+- Каналы, ленты статусов, broadcast-источники и боты внутри MAX не добавляются в очередь.
+- ПКМ по диалогу открывает действие «Убрать в архив». Строка «Архив» над списком переключает интерфейс между активными и архивными переписками.
+- Кнопка ответа у сообщения создает нативную цитату, если подключенный провайдер поддерживает quoted/reply ID.
+## Текущие ограничения
 
-### 2. Python Configuration
-In Beget CP -> **Web sites** -> **Python Settings**:
-1. Select **Passenger**.
-2. Point the "Path to application" to the project root.
-3. Ensure `passenger_wsgi.py` exists in the root.
+- возможности bridge существующего Telegram-бота зависят от данных, которые передает сам бот;
+- для полноценной событийной работы нескольких процессов Redis обязателен;
+- SQLite подходит только для упрощенного ручного запуска без Docker.
 
-### 3. Database
-1. Create a MySQL database in Beget CP.
-2. Edit `.env` with your database credentials.
-3. Run migrations via SSH:
-   ```bash
-   python3 manage.py migrate
-   python3 manage.py createsuperuser
-   ```
+## Документация
 
-### 4. Cron Jobs Setup
-Add these to **Cron** in Beget CP:
+- [SETUP.md](SETUP.md) — короткие практические шаги запуска, подключения каналов и ежедневного управления.
+- [TECHNICAL_OPERATIONS.md](TECHNICAL_OPERATIONS.md) — устройство Docker, переменные, хранилища, ручной запуск и расширенная диагностика.
+- [deploy/README.md](deploy/README.md) — практическое production-развертывание на Linux VPS с Docker Compose, Nginx, резервными копиями и обновлением.
+- [EXISTING_BOT_INTEGRATION.md](EXISTING_BOT_INTEGRATION.md) — протокол интеграции существующего Telegram-бота с CRM.
 
-| Schedule | Command |
-| :--- | :--- |
-| `* * * * *` | `python3 ~/site.com/public_html/manage.py sync_telegram` |
-| `0 0 * * *` | `python3 ~/site.com/public_html/manage.py cleanup_messages` |
+## Структура репозитория
 
-## Usage
+```text
+CRM/                    настройки Django, ASGI и Celery
+crm_app/                модели, API, интеграции, коннекторы и фоновые задачи
+frontend/               веб-интерфейс оператора
+deploy/                 production Docker Compose, пример .env и Nginx
+docker-compose.yml      локальный запуск всех сервисов одной командой
+media/                  загруженные медиафайлы при ручном запуске
+sessions/               локальные данные сессий Telegram при ручном запуске
+```
 
-### Adding Telegram Account
-1. Go to `/admin/` -> **Telegram Accounts**.
-2. For personal accounts, enter API ID, API Hash, and Phone.
-3. Use the management command or UI to start authentication.
+## Лицензия
 
-### Existing Bot Integration
-In a process.
+Apache-2.0. См. [LICENSE](LICENSE).
 
-## License
-Apache-2.0
+
+## Интеграция WhatsApp
+
+WhatsApp подключается через GREEN-API. CRM принимает уведомления Webhook Endpoint, проверяет заголовок `Authorization`, сохраняет входящие сообщения и фоновой задачей скачивает вложения. Текст отправляется методом `sendMessage`, файлы — `sendFileByUpload`; поддерживаются цитирование и статусы `sent`, `delivered`, `read`, `failed` и `noAccount`.
+
+Для работы нужен созданный и авторизованный инстанс GREEN-API. Его `idInstance`, `apiTokenInstance` и отдельный токен webhook сохраняются в аккаунте CRM. Настройка приведена в [SETUP.md](SETUP.md).
+
+## Интеграция MAX
+
+MAX подключается как личный аккаунт через отдельный MAX-инстанс GREEN-API. CRM принимает входящие уведомления через защищённый `Authorization` webhook, сохраняет текст и медиа, отправляет ответы методами `sendMessage` и `sendFileByUpload`, а также обрабатывает статусы доставки. Числовой `chatId` MAX передаётся без WhatsApp-суффикса `@c.us`.
+
+Для работы нужны `idInstance`, `apiTokenInstance`, отдельный токен webhook и публичный HTTPS URL CRM. Практическая настройка приведена в [SETUP.md](SETUP.md).

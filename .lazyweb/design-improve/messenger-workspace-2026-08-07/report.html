@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UX-аудит интерфейса мессенджеров</title>
+<style>
+:root{--bg:#0b1220;--card:#111b2e;--line:#26344d;--text:#eaf1fb;--muted:#9babc2;--tg:#229ed9;--max:#7c5cff;--wa:#25d366}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#162642,var(--bg) 45%);color:var(--text);font:15px/1.55 Inter,Segoe UI,sans-serif}.wrap{max-width:1180px;margin:auto;padding:44px 24px 80px}h1{font-size:42px;line-height:1.08;margin:.15em 0}h2{font-size:26px;margin:48px 0 18px}.lede,.muted{color:var(--muted)}.tag{display:inline-block;padding:6px 10px;border:1px solid #2c4164;border-radius:99px;color:#9bdcff}.hero{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:center}.card{background:rgba(17,27,46,.92);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:0 20px 70px #0005}.shot{width:100%;border-radius:13px;border:1px solid #34445f;background:#070b12}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}.idea{position:relative;padding-left:58px}.num{position:absolute;left:0;top:0;width:40px;height:40px;border-radius:12px;display:grid;place-items:center;background:#229ed922;color:#65c9fa;font-weight:800}.idea h3{margin:0 0 6px}.before{color:#ffb4ad}.after{color:#92e6a7}.channels{display:flex;gap:8px;margin:16px 0}.channel{padding:10px 14px;border-radius:12px;background:#fff1;color:#bbc9dc}.channel.tg{box-shadow:inset 0 0 0 1px var(--tg);color:#78d4ff}.sketch{display:grid;grid-template-columns:34% 66%;height:260px;border:1px solid #34445f;border-radius:16px;overflow:hidden}.side{padding:12px;background:#101a2b;border-right:1px solid #34445f}.row{height:44px;border-radius:9px;background:#ffffff0d;margin:8px 0}.row.bot{border-left:3px solid var(--tg);background:#229ed917}.main{display:grid;place-items:center;background:radial-gradient(circle,#229ed916,transparent 60%);color:var(--muted)}a{color:#74cbf6}@media(max-width:760px){.hero,.grid{grid-template-columns:1fr}h1{font-size:32px}}
+</style></head>
+<body><main class="wrap">
+<span class="tag">UX/UI review · 07.08.2026</span>
+<h1>Единое рабочее место оператора</h1>
+<p class="lede">Фокус аудита: быстрее отличать канал и источник Telegram, убрать шум системных предупреждений и подготовить интерфейс к MAX и WhatsApp без ложного ощущения готовой интеграции.</p>
+<section class="hero"><div><h2>Текущий обновлённый экран</h2><p>Сильная основа — привычная двухпанельная модель. Главные изменения строятся вокруг ясной иерархии: канал → тип аккаунта → диалог → сообщение.</p><div class="channels"><span class="channel tg">Telegram</span><span class="channel">MAX · скоро</span><span class="channel">WhatsApp · скоро</span></div></div><div class="card"><img class="shot" src="references/current.png" alt="Текущий интерфейс CRM"></div></section>
+<h2>Что было не так</h2>
+<div class="grid">
+<div class="card idea"><span class="num">1</span><h3>Системный шум</h3><p class="before">Было: ошибка появлялась каждые 3 секунды, а один аккаунт повторялся по числу его чатов.</p><p class="after">Стало: один спокойный индикатор, уникальные аккаунты, автоматическое исчезновение после восстановления.</p></div>
+<div class="card idea"><span class="num">2</span><h3>Источник не читался</h3><p class="before">Было: бот и личный Telegram выглядели одинаково.</p><p class="after">Стало: компактные бейджи «Бот» / «Личный аккаунт», имя подключения и отдельная форма аватара бота.</p></div>
+<div class="card idea"><span class="num">3</span><h3>Каналы смешивались с будущими функциями</h3><p class="before">Было: интерфейс был только Telegram, масштабирование не просматривалось.</p><p class="after">Стало: постоянный переключатель каналов, плавная смена палитры и честные пустые состояния для будущих интеграций.</p></div>
+<div class="card idea"><span class="num">4</span><h3>Приоритет обращений</h3><p class="before">Было: сортировка только по времени.</p><p class="after">Стало: обращения из бота закреплены первым блоком, внутри блока сохраняется сортировка по активности.</p></div>
+</div>
+<h2>Эскиз принятой иерархии</h2>
+<div class="card sketch"><div class="side"><div class="channels"><span class="channel tg">TG</span><span class="channel">MAX</span><span class="channel">WA</span></div><div class="row bot"></div><div class="row bot"></div><div class="row"></div><div class="row"></div></div><div class="main">Выбранный диалог и быстрый ответ</div></div>
+<h2>Референсы</h2>
+<div class="grid">
+<div class="card"><img class="shot" src="references/intercom-inbox.png" alt="Intercom Inbox"><h3>Intercom Inbox</h3><p class="muted">Взяты: ясная рабочая иерархия, спокойные состояния и разделение служебной информации от переписки.</p><a href="https://www.intercom.com/helpdesk/inbox">Официальная страница</a></div>
+<div class="card"><img class="shot" src="references/front-inbox.png" alt="Front omnichannel inbox"><h3>Front Omnichannel Inbox</h3><p class="muted">Взяты: единая точка входа для каналов, высокая плотность списка без потери читаемости.</p><a href="https://front.com/product/omnichannel-support-inbox">Официальная страница</a></div>
+</div>
+<h2>Следующий UX-слой</h2><p class="lede">После подключения MAX/WhatsApp логично добавить единые фильтры «непрочитанные / мои / без ответа», SLA-индикатор времени ожидания и карточку клиента справа. Сейчас они намеренно не добавлены, чтобы не перегружать первый рабочий этап.</p>
+</main></body></html>

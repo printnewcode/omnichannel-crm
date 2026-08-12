@@ -1,0 +1,405 @@
+import hashlib
+import hmac
+import json
+from unittest.mock import AsyncMock, patch
+
+from asgiref.sync import async_to_sync
+from django.contrib.auth.models import User
+from django.test import TestCase, TransactionTestCase, override_settings
+from django.urls import reverse
+from django.utils import timezone
+
+from crm_app.models import Chat, ChatAssignment, Message, OutboundDelivery, TelegramAccount
+from crm_app.services.outbound_delivery import enqueue_delivery, process_next_delivery
+
+
+class ProviderWebhookTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='provider-operator')
+
+    def test_green_api_text_message_is_ingested_without_assignment(self):
+        account = TelegramAccount.objects.create(
+            name='WhatsApp', account_type=TelegramAccount.AccountType.WHATSAPP,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            green_api_instance_id='10001', green_api_token='api-token',
+            green_webhook_token='verify-me',
+        )
+        url = reverse('whatsapp-webhook', kwargs={'account_id': account.id})
+        payload = {
+            'typeWebhook': 'incomingMessageReceived',
+            'instanceData': {'idInstance': 10001},
+            'timestamp': 1700000000,
+            'idMessage': 'green.test',
+            'senderData': {
+                'chatId': '79990001122@c.us', 'sender': '79990001122@c.us',
+                'senderName': 'Ivan',
+            },
+            'messageData': {
+                'typeMessage': 'textMessage',
+                'textMessageData': {'textMessage': 'Hello'},
+            },
+        }
+        response = self.client.post(
+            url, data=json.dumps(payload), content_type='application/json',
+            headers={'Authorization': 'Bearer verify-me'},
+        )
+        self.assertEqual(response.status_code, 200)
+        message = Message.objects.get(external_message_id='green.test')
+        self.assertEqual(message.text, 'Hello')
+        self.assertEqual(message.chat.telegram_account, account)
+        self.assertFalse(ChatAssignment.objects.filter(chat=message.chat).exists())
+    def test_max_personal_message_is_ingested_and_token_is_checked(self):
+        account = TelegramAccount.objects.create(
+            name='MAX personal',
+            account_type=TelegramAccount.AccountType.MAX,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            green_api_instance_id='20002',
+            green_api_token='max-api-token',
+            green_webhook_token='max-hook-token',
+        )
+        url = reverse('max-webhook', kwargs={'account_id': account.id})
+        payload = {
+            'typeWebhook': 'incomingMessageReceived',
+            'instanceData': {'idInstance': 20002},
+            'timestamp': 1700000000,
+            'idMessage': 'max-green-in',
+            'senderData': {
+                'chatId': '10000000',
+                'sender': '10000000',
+                'senderName': 'Max User',
+                'chatType': 'user',
+            },
+            'messageData': {
+                'typeMessage': 'textMessage',
+                'textMessageData': {'textMessage': 'Question'},
+            },
+        }
+        response = self.client.post(
+            url, data=json.dumps(payload), content_type='application/json',
+            headers={'Authorization': 'Bearer max-hook-token'},
+        )
+        self.assertEqual(response.status_code, 200)
+        message = Message.objects.get(external_message_id='max-green-in')
+        self.assertEqual(message.text, 'Question')
+        self.assertEqual(message.chat.metadata['external_chat_id'], '10000000')
+
+        forbidden = self.client.post(
+            url, data=json.dumps(payload), content_type='application/json',
+            headers={'Authorization': 'Bearer wrong'},
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+    def test_provider_bot_peer_is_saved_but_marked_hidden(self):
+        account = TelegramAccount.objects.create(
+            name='MAX personal', account_type=TelegramAccount.AccountType.MAX,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            green_api_instance_id='20004', green_api_token='token',
+            green_webhook_token='hook',
+        )
+        payload = {
+            'typeWebhook': 'incomingMessageReceived',
+            'instanceData': {'idInstance': 20004},
+            'timestamp': 1700000000,
+            'idMessage': 'max-bot-in',
+            'senderData': {
+                'chatId': '10000001', 'sender': '10000001',
+                'senderName': 'MAX bot', 'chatType': 'user', 'isBot': True,
+            },
+            'messageData': {
+                'typeMessage': 'textMessage',
+                'textMessageData': {'textMessage': 'Bot message'},
+            },
+        }
+        response = self.client.post(
+            reverse('max-webhook', kwargs={'account_id': account.id}),
+            data=json.dumps(payload), content_type='application/json',
+            headers={'Authorization': 'Bearer hook'},
+        )
+        self.assertEqual(response.status_code, 200)
+        message = Message.objects.get(external_message_id='max-bot-in')
+        self.assertTrue(message.chat.is_bot)
+    def test_max_negative_chat_id_is_treated_as_group_even_if_provider_says_user(self):
+        account = TelegramAccount.objects.create(
+            name='MAX personal', account_type=TelegramAccount.AccountType.MAX,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            green_api_instance_id='20003', green_api_token='token',
+            green_webhook_token='hook',
+        )
+        payload = {
+            'typeWebhook': 'incomingMessageReceived',
+            'instanceData': {'idInstance': 20003},
+            'timestamp': 1700000000,
+            'idMessage': 'max-group-in',
+            'senderData': {
+                'chatId': '-70000001', 'sender': '10000000',
+                'senderName': 'Group member', 'chatType': 'user',
+            },
+            'messageData': {
+                'typeMessage': 'textMessage',
+                'textMessageData': {'textMessage': 'Group message'},
+            },
+        }
+        response = self.client.post(
+            reverse('max-webhook', kwargs={'account_id': account.id}),
+            data=json.dumps(payload), content_type='application/json',
+            headers={'Authorization': 'Bearer hook'},
+        )
+        self.assertEqual(response.status_code, 200)
+        message = Message.objects.get(external_message_id='max-group-in')
+        self.assertEqual(message.chat.chat_type, Chat.ChatType.GROUP)
+
+
+class OutboundDeliveryTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='delivery-operator', password='secret')
+        self.account = TelegramAccount.objects.create(
+            name='Telegram',
+            account_type=TelegramAccount.AccountType.PERSONAL,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            session_string='test',
+        )
+        self.chat = Chat.objects.create(
+            telegram_id=100,
+            telegram_account=self.account,
+            chat_type=Chat.ChatType.PRIVATE,
+        )
+
+    @patch('crm_app.services.outbound_delivery.publish_delivery')
+    @patch('crm_app.services.message_router.MessageRouter.send_message', return_value=777)
+    def test_outbox_creates_sent_message(self, send_message, publish_delivery):
+        delivery = enqueue_delivery(chat=self.chat, text='Reply', requested_by=self.user)
+        self.assertTrue(process_next_delivery())
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, OutboundDelivery.Status.SENT)
+        self.assertEqual(delivery.provider_message_id, '777')
+        self.assertEqual(delivery.created_message.text, 'Reply')
+        send_message.assert_called_once()
+        sent_delivery = publish_delivery.call_args.args[0]
+        self.assertEqual(sent_delivery.status, OutboundDelivery.Status.SENT)
+
+    def test_api_enqueues_without_contacting_provider(self):
+        self.client.force_login(self.user)
+        url = reverse('chat-send-message', kwargs={'pk': self.chat.pk})
+        with patch('crm_app.services.message_router.MessageRouter.send_message') as send_message:
+            response = self.client.post(
+                url,
+                data=json.dumps({'text': 'Queued'}),
+                content_type='application/json',
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()['status'], 'pending')
+        self.assertTrue(OutboundDelivery.objects.filter(text='Queued').exists())
+        send_message.assert_not_called()
+class TelegramAccountCreationTests(TestCase):
+    @patch('crm_app.services.telegram_client_manager.TelegramClientManager.authenticate_account_sync')
+    def test_creating_personal_account_does_not_start_mtproto_in_web_process(self, authenticate):
+        account = TelegramAccount.objects.create(
+            name='Explicit auth only',
+            account_type=TelegramAccount.AccountType.PERSONAL,
+            phone_number='+79990000000',
+            api_id=12345,
+            api_hash='0123456789abcdef0123456789abcdef',
+        )
+
+        account.refresh_from_db()
+        self.assertEqual(account.status, TelegramAccount.AccountStatus.INACTIVE)
+        authenticate.assert_not_called()
+
+    @patch('crm_app.services.telegram_client_manager.TelegramClientManager.authenticate_account_sync')
+    def test_admin_add_personal_account_returns_without_starting_mtproto(self, authenticate):
+        admin_user = User.objects.create_superuser(
+            username='isolated-admin', password='test-password', email='admin@example.test'
+        )
+        self.client.force_login(admin_user)
+
+        response = self.client.post(reverse('admin:crm_app_telegramaccount_add'), data={
+            'name': 'Saved through Admin',
+            'account_type': TelegramAccount.AccountType.PERSONAL,
+            'status': TelegramAccount.AccountStatus.INACTIVE,
+            'phone_number': '+79990000099',
+            'api_id': '12345',
+            'api_hash': '0123456789abcdef0123456789abcdef',
+            'green_api_url': 'https://api.green-api.com',
+            'green_media_url': 'https://media.green-api.com',
+            'api_version': 'v23.0',
+            'error_count': '0',
+            '_save': 'Save',
+        })
+
+        self.assertEqual(response.status_code, 302)
+        account = TelegramAccount.objects.get(name='Saved through Admin')
+        self.assertEqual(account.status, TelegramAccount.AccountStatus.INACTIVE)
+        authenticate.assert_not_called()
+class TelegramConnectorLifecycleTests(TestCase):
+    def test_process_shutdown_keeps_account_active(self):
+        from crm_app.services.telegram_client_manager import TelegramClientManager
+
+        account = TelegramAccount.objects.create(
+            name='Persistent connector account',
+            account_type=TelegramAccount.AccountType.PERSONAL,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            session_string='test-session',
+        )
+        manager = TelegramClientManager()
+        manager._clients.clear()
+        client = AsyncMock()
+        manager._clients[account.id] = client
+
+        async_to_sync(manager.stop_all)()
+
+        account.refresh_from_db()
+        self.assertEqual(account.status, TelegramAccount.AccountStatus.ACTIVE)
+        client.disconnect.assert_awaited_once()
+        self.assertNotIn(account.id, manager._clients)
+
+class TelegramAdminConnectorControlTests(TestCase):
+    def setUp(self):
+        self.admin_user = User.objects.create_superuser(
+            username='connector-admin', password='test-password', email='connector@example.test'
+        )
+        self.client.force_login(self.admin_user)
+        self.account = TelegramAccount.objects.create(
+            name='Admin controlled account',
+            account_type=TelegramAccount.AccountType.PERSONAL,
+            status=TelegramAccount.AccountStatus.INACTIVE,
+            session_string='test-session',
+        )
+
+    @patch('crm_app.services.telegram_client_manager.TelegramClientManager.start_client_sync')
+    @patch('crm_app.services.telegram_client_manager.TelegramClientManager.check_authorization_sync')
+    def test_start_action_only_records_desired_state(self, check_authorization, start_client):
+        response = self.client.post(
+            reverse('admin:crm_app_telegramaccount_changelist'),
+            data={
+                'action': 'start_accounts',
+                '_selected_action': [str(self.account.pk)],
+                'select_across': '0',
+                'index': '0',
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.status, TelegramAccount.AccountStatus.ACTIVE)
+        self.assertIsNone(self.account.restart_requested_at)
+        start_client.assert_not_called()
+        check_authorization.assert_not_called()
+
+    def test_restart_action_sets_connector_request(self):
+        response = self.client.post(
+            reverse('admin:crm_app_telegramaccount_changelist'),
+            data={
+                'action': 'restart_accounts',
+                '_selected_action': [str(self.account.pk)],
+                'select_across': '0',
+                'index': '0',
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.status, TelegramAccount.AccountStatus.ACTIVE)
+        self.assertIsNotNone(self.account.restart_requested_at)
+
+
+class TelegramConnectorReconciliationTests(TransactionTestCase):
+    def setUp(self):
+        from crm_app.services.telegram_client_manager import TelegramClientManager
+
+        self.manager = TelegramClientManager()
+        self.manager._clients.clear()
+        self.manager._tasks.clear()
+
+    def tearDown(self):
+        self.manager._clients.clear()
+        self.manager._tasks.clear()
+
+    def test_reconciliation_stops_account_disabled_in_admin(self):
+        account = TelegramAccount.objects.create(
+            name='Disabled account',
+            account_type=TelegramAccount.AccountType.PERSONAL,
+            status=TelegramAccount.AccountStatus.INACTIVE,
+            session_string='test-session',
+        )
+        client = AsyncMock()
+        self.manager._clients[account.id] = client
+
+        async_to_sync(self.manager.start_all_active)()
+
+        client.disconnect.assert_awaited_once()
+        self.assertNotIn(account.id, self.manager._clients)
+        account.refresh_from_db()
+        self.assertEqual(account.status, TelegramAccount.AccountStatus.INACTIVE)
+
+    def test_reconciliation_applies_restart_request(self):
+        account = TelegramAccount.objects.create(
+            name='Restarted account',
+            account_type=TelegramAccount.AccountType.PERSONAL,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            session_string='test-session',
+            restart_requested_at=timezone.now(),
+        )
+        client = AsyncMock()
+        self.manager._clients[account.id] = client
+
+        with patch.object(self.manager, 'start_client', new=AsyncMock(return_value=True)) as start_client:
+            async_to_sync(self.manager.start_all_active)()
+
+        client.disconnect.assert_awaited_once()
+        start_client.assert_awaited_once()
+        account.refresh_from_db()
+        self.assertIsNone(account.restart_requested_at)
+class AdminNamingTests(TestCase):
+    def test_messenger_neutral_names_are_used(self):
+        self.assertEqual(TelegramAccount._meta.verbose_name, 'Аккаунт мессенджера')
+        self.assertEqual(TelegramAccount._meta.verbose_name_plural, 'Аккаунты мессенджеров')
+        self.assertNotIn('Business', TelegramAccount.AccountType.WHATSAPP.label)
+
+class GreenAPIWebhookAdminTests(TestCase):
+    def setUp(self):
+        self.admin_user = User.objects.create_superuser(
+            username='green-admin', password='test-password', email='green@example.test'
+        )
+        self.client.force_login(self.admin_user)
+        self.account = TelegramAccount.objects.create(
+            name='MAX webhook',
+            account_type=TelegramAccount.AccountType.MAX,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            green_api_instance_id='20002',
+            green_api_token='api-token',
+            green_webhook_token='webhook-token',
+        )
+
+    @override_settings(DOMAIN='https://crm.example.test')
+    @patch('crm_app.services.whatsapp_client.GreenAPIClient.configure_webhook')
+    def test_admin_uses_public_domain_instead_of_internal_request_host(self, configure_webhook):
+        response = self.client.post(
+            reverse('admin:crm_app_telegramaccount_changelist'),
+            data={
+                'action': 'configure_green_api_webhooks',
+                '_selected_action': [str(self.account.pk)],
+                'select_across': '0',
+                'index': '0',
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        configure_webhook.assert_called_once_with(
+            f'https://crm.example.test/api/integrations/max/{self.account.pk}/webhook/'
+        )
+
+    @override_settings(DOMAIN='http://127.0.0.1:8000')
+    @patch('crm_app.services.whatsapp_client.GreenAPIClient.configure_webhook')
+    def test_admin_rejects_private_http_webhook(self, configure_webhook):
+        response = self.client.post(
+            reverse('admin:crm_app_telegramaccount_changelist'),
+            data={
+                'action': 'configure_green_api_webhooks',
+                '_selected_action': [str(self.account.pk)],
+                'select_across': '0',
+                'index': '0',
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        configure_webhook.assert_not_called()

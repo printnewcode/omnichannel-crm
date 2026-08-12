@@ -9,6 +9,8 @@ from django.utils import timezone
 from django.conf import settings
 from ..models import Message as MessageModel, TelegramAccount, Chat
 from .telegram_client_manager import TelegramClientManager
+from .jget_bridge import send_reply as send_jget_reply
+from .channel_adapters import send_max_message, send_whatsapp_message
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,16 @@ class MessageRouter:
                     media_path=media_path
                 )
             elif account.account_type == TelegramAccount.AccountType.BOT:
+                if account.bridge_url:
+                    if media_path:
+                        logger.error("JGET bridge does not support media replies yet")
+                        return None
+                    return await asyncio.to_thread(
+                        send_jget_reply,
+                        account,
+                        text,
+                        message=message,
+                    )
                 # Отправка через Bot API (telebot webhook)
                 return await self._send_via_bot_api(
                     account=account,
@@ -101,14 +113,31 @@ class MessageRouter:
                     media_path=media_path
                 )
             elif account.account_type == TelegramAccount.AccountType.BOT:
+                if account.bridge_url:
+                    if media_path:
+                        logger.error("JGET bridge does not support media replies yet")
+                        return None
+                    return send_jget_reply(account, text, message=message)
                 # Отправка через Bot API (используем persistent loop)
                 return self.client_manager.run_async_sync(self.send_reply_async(message, text, media_path))
+            elif account.account_type == TelegramAccount.AccountType.WHATSAPP:
+                return send_whatsapp_message(
+                    account, chat, text, media_path, reply_to_message=message
+                )
+            elif account.account_type == TelegramAccount.AccountType.MAX:
+                return send_max_message(
+                    account, chat, text, media_path, reply_to_message=message
+                )
             else:
                 logger.error(f"Unknown account type: {account.account_type}")
                 return None
 
         except Exception as e:
             logger.exception(f"Error in send_reply sync wrapper: {e}")
+            if 'account' in locals() and account.account_type in {
+                TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX,
+            }:
+                raise
             return None
     
     async def _send_via_telethon(
@@ -368,6 +397,11 @@ class MessageRouter:
                     media_path=media_path
                 )
             elif account.account_type == TelegramAccount.AccountType.BOT:
+                if account.bridge_url:
+                    if media_path:
+                        logger.error("JGET bridge does not support media replies yet")
+                        return None
+                    return send_jget_reply(account, text, chat=chat)
                 # Отправка через Bot API (используем persistent loop)
                 return self.client_manager.run_async_sync(self._send_via_bot_api(
                     account=account,
@@ -375,12 +409,20 @@ class MessageRouter:
                     text=text,
                     media_path=media_path
                 ))
+            elif account.account_type == TelegramAccount.AccountType.WHATSAPP:
+                return send_whatsapp_message(account, chat, text, media_path)
+            elif account.account_type == TelegramAccount.AccountType.MAX:
+                return send_max_message(account, chat, text, media_path)
             else:
                 logger.error(f"Unknown account type: {account.account_type}")
                 return None
 
         except Exception as e:
             logger.exception(f"Error sending message: {e}")
+            if 'account' in locals() and account.account_type in {
+                TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX,
+            }:
+                raise
         return None
 
     def create_outgoing_message(
@@ -406,8 +448,13 @@ class MessageRouter:
         Returns:
             MessageModel: Созданная модель сообщения
         """
+        is_telegram = chat.telegram_account.account_type in {
+            TelegramAccount.AccountType.PERSONAL,
+            TelegramAccount.AccountType.BOT,
+        }
         return MessageModel.objects.create(
-            telegram_id=telegram_message_id,
+            telegram_id=int(telegram_message_id) if is_telegram else None,
+            external_message_id=None if is_telegram else str(telegram_message_id),
             chat=chat,
             text=text,
             message_type=message_type,

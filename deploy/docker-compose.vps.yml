@@ -1,0 +1,122 @@
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --innodb-buffer-pool-size=128M --max-connections=100 --performance-schema=OFF
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build:
+      context: ..
+    env_file:
+      - ../.env
+    environment:
+      LOCAL: "False"
+      DB_HOST: db
+      DB_PORT: "3306"
+      REDIS_URL: redis://redis:6379/0
+      RUN_TELETHON_CLIENTS: "0"
+    command: sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../staticfiles:/app/staticfiles
+      - ../media:/app/media
+      - ../logs:/app/logs
+
+  web:
+    build:
+      context: ..
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      LOCAL: "False"
+      DB_HOST: db
+      DB_PORT: "3306"
+      REDIS_URL: redis://redis:6379/0
+      RUN_TELETHON_CLIENTS: "0"
+    command: daphne -b 0.0.0.0 -p 8000 CRM.asgi:application
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ../staticfiles:/app/staticfiles
+      - ../media:/app/media
+      - ../sessions:/app/sessions
+      - ../logs:/app/logs
+
+  connector:
+    stop_grace_period: 30s
+    build:
+      context: ..
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      LOCAL: "False"
+      DB_HOST: db
+      DB_PORT: "3306"
+      REDIS_URL: redis://redis:6379/0
+      RUN_TELETHON_CLIENTS: "0"
+    command: python manage.py start_telegram_accounts --reconcile-interval 900 --account-refresh-interval 10
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ../media:/app/media
+      - ../sessions:/app/sessions
+      - ../logs:/app/logs
+
+  worker:
+    stop_grace_period: 30s
+    build:
+      context: ..
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      LOCAL: "False"
+      DB_HOST: db
+      DB_PORT: "3306"
+      REDIS_URL: redis://redis:6379/0
+      RUN_TELETHON_CLIENTS: "0"
+    command: celery -A CRM worker --loglevel=INFO --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=100
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ../media:/app/media
+      - ../logs:/app/logs
+
+volumes:
+  mysql_data:
+  redis_data:
