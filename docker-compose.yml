@@ -13,10 +13,11 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 10s
       timeout: 5s
       retries: 20
+      start_period: 20s
 
   redis:
     image: redis:7-alpine
@@ -50,7 +51,11 @@ services:
       SECURE_SSL_REDIRECT: "False"
       SESSION_COOKIE_SECURE: "False"
       CSRF_COOKIE_SECURE: "False"
-    command: sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput"
+    command: >
+      sh -c "until python manage.py migrate --noinput; do
+        echo 'MySQL is not ready yet; retrying in 5 seconds';
+        sleep 5;
+      done && python manage.py collectstatic --noinput"
     depends_on:
       db:
         condition: service_healthy

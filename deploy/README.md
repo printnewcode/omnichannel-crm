@@ -55,21 +55,21 @@ RUN_TELETHON_CLIENTS=0
 ## 4. Запустить CRM
 
 ```bash
-sudo docker compose -f deploy/docker-compose.vps.yml up -d --build
-sudo docker compose -f deploy/docker-compose.vps.yml exec web python manage.py createsuperuser
+sudo docker compose --env-file .env -f deploy/docker-compose.vps.yml up -d --build
+sudo docker compose --env-file .env -f deploy/docker-compose.vps.yml exec web python manage.py createsuperuser
 ```
 
 Если сборка прервалась, сначала получите последние изменения и повторите её:
 
 ```bash
 git pull
-sudo docker compose -f deploy/docker-compose.vps.yml up -d --build
+sudo docker compose --env-file .env -f deploy/docker-compose.vps.yml up -d --build
 ```
 
 Проверить запуск:
 
 ```bash
-sudo docker compose -f deploy/docker-compose.vps.yml ps
+sudo docker compose --env-file .env -f deploy/docker-compose.vps.yml ps
 ```
 
 У сервисов должен быть статус `Up`, а у `db` и `redis` — `healthy`.
@@ -101,7 +101,7 @@ sudo certbot --nginx -d ВАШ.ДОМЕН
 ```bash
 cd /home/omnichannel-crm
 git pull
-sudo docker compose -f deploy/docker-compose.vps.yml up -d --build
+sudo docker compose --env-file .env -f deploy/docker-compose.vps.yml up -d --build
 ```
 
 Миграции и статика применяются автоматически.
@@ -111,19 +111,19 @@ sudo docker compose -f deploy/docker-compose.vps.yml up -d --build
 Статус:
 
 ```bash
-sudo docker compose -f deploy/docker-compose.vps.yml ps
+sudo docker compose --env-file .env -f deploy/docker-compose.vps.yml ps
 ```
 
 Логи:
 
 ```bash
-sudo docker compose -f deploy/docker-compose.vps.yml logs --tail=100 web connector worker
+sudo docker compose --env-file .env -f deploy/docker-compose.vps.yml logs --tail=100 web connector worker
 ```
 
 Перезапуск:
 
 ```bash
-sudo docker compose -f deploy/docker-compose.vps.yml restart web connector worker
+sudo docker compose --env-file .env -f deploy/docker-compose.vps.yml restart web connector worker
 ```
 
 Проверка:
