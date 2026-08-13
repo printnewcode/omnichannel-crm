@@ -6,7 +6,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     TelegramAccountViewSet, ChatViewSet, MessageViewSet,
     BotWebhookView, HealthCheckView, SystemStatusView, SystemControlView,
-    SyncMessagesView, FileUploadView
+    SyncMessagesView, FileUploadView, HistoryImportJobViewSet
 )
 from .integration_views import JgetQuestionWebhookView, MaxWebhookView, WhatsAppWebhookView
 
@@ -14,6 +14,7 @@ router = DefaultRouter()
 router.register(r'accounts', TelegramAccountViewSet, basename='telegram-account')
 router.register(r'chats', ChatViewSet, basename='chat')
 router.register(r'messages', MessageViewSet, basename='message')
+router.register(r'history-imports', HistoryImportJobViewSet, basename='history-import')
 
 urlpatterns = [
     path('api/', include(router.urls)),

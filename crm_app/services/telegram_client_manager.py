@@ -690,6 +690,9 @@ class TelegramClientManager:
             return '.mp4'
         if message_type in {'voice', 'audio'}:
             return '.ogg'
+        telethon_extension = getattr(getattr(message, 'file', None), 'ext', None)
+        if telethon_extension:
+            return telethon_extension
         original = getattr(getattr(message, 'file', None), 'name', None)
         if original:
             return Path(original).suffix or '.bin'

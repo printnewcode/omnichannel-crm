@@ -140,6 +140,23 @@ const normalizeList = (payload) => {
   return [];
 };
 
+const renderTgsSticker = async (element) => {
+  if (!element || element.dataset.loaded === '1') return;
+  element.dataset.loaded = '1';
+  try {
+    const response = await fetch(element.dataset.src);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const bytes = await response.arrayBuffer();
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    const animationData = JSON.parse(await new Response(stream).text());
+    if (!window.lottie) throw new Error('Lottie renderer unavailable');
+    window.lottie.loadAnimation({container: element, renderer: 'svg', loop: true, autoplay: true, animationData});
+  } catch (error) {
+    element.innerHTML = '<span class="sticker-fallback">Анимированный стикер</span>';
+    console.error('Could not render TGS sticker', error);
+  }
+};
+
 const localizeError = (err) => {
   return getRussianError(err);
 };
@@ -624,7 +641,7 @@ const renderMessages = (messages, forceScroll = false) => {
     const div = document.createElement("div");
     // Only animate if it's a new message during polling (not first load of chat)
     const animateClass = (!forceScroll && renderedMessageIds.size > 0) ? "animate-in" : "";
-    div.className = `message ${msg.is_outgoing ? "message--outgoing" : "message--incoming"} ${animateClass}`;
+    div.className = `message ${msg.is_outgoing ? "message--outgoing" : "message--incoming"} ${msg.message_type === 'sticker' ? 'message--sticker' : ''} ${animateClass}`;
     div.dataset.msgId = msg.id;
 
     let content = `<div class="message__text">${escapeHtml(msg.text || "")}</div>`;
@@ -644,7 +661,14 @@ const renderMessages = (messages, forceScroll = false) => {
       const safeUrl = mediaUrl.replace(/'/g, "\\'");
 
       if (msg.message_type === 'photo' || msg.message_type === 'sticker') {
-        content = `<div class="message__media"><img src="${mediaUrl}" class="message__media--image" onclick="openMediaViewer('${safeUrl}', 'image')" style="cursor: pointer; max-width: 100%;"></div>` + content;
+        const extension = (msg.media_file_name || msg.media_file_path || '').split('.').pop().toLowerCase();
+        if (msg.message_type === 'sticker' && extension === 'webm') {
+          content = `<div class="message__media message__media--sticker"><video class="sticker-video" src="${mediaUrl}" autoplay loop muted playsinline></video></div>` + content;
+        } else if (msg.message_type === 'sticker' && extension === 'tgs') {
+          content = `<div class="message__media message__media--sticker tgs-sticker" data-src="${mediaUrl}"></div>` + content;
+        } else {
+          content = `<div class="message__media ${msg.message_type === 'sticker' ? 'message__media--sticker' : ''}"><img src="${mediaUrl}" class="message__media--image" onclick="openMediaViewer('${safeUrl}', 'image')" style="cursor: pointer; max-width: 100%;"></div>` + content;
+        }
       } else if (msg.message_type === 'video') {
         content = `<div class="message__media" onclick="openMediaViewer('${safeUrl}', 'video')" style="cursor: pointer; position: relative;">
                              <video src="${mediaUrl}" style="max-width: 100%;"></video>
@@ -671,6 +695,7 @@ const renderMessages = (messages, forceScroll = false) => {
     else replyButton?.addEventListener('click', () => setReplyTarget(msg));
     div.hidden = Boolean(messageSearchQuery) && !visibleIds.has(String(msg.id));
     messageList.appendChild(div);
+    div.querySelectorAll('.tgs-sticker').forEach(renderTgsSticker);
     renderedMessageIds.add(msg.id);
   });
 
@@ -713,6 +738,8 @@ window.downloadViaApi = async (msgId, button) => {
   if (active) active.textContent = chat ? getChatName(chat) : "Выберите диалог";
   setStatus(chat ? getAccountLabel(chat) + " · " + (chat.telegram_account?.name || (accountType === "max" ? "MAX" : accountType === "whatsapp" ? "WhatsApp" : "Telegram")) : "Сообщения выбранного чата появятся здесь");
   setComposerEnabled(Boolean(chat) && getMessenger(chat) === currentMessenger);
+  const historyButton = document.getElementById('import-history-btn');
+  if (historyButton) historyButton.hidden = !chat || getAccountType(chat) === 'bot';
 };
 const validateSelectedFile = (file) => {
   if (!file || file.size === 0) throw new Error('Нельзя загрузить пустой файл.');
@@ -801,6 +828,82 @@ const insertEmoji = (input, emoji) => {
   input.focus();
 };
 document.addEventListener("DOMContentLoaded", () => {
+  const openModal = (id) => { const modal = document.getElementById(id); if (modal) modal.hidden = false; };
+  const closeModal = (id) => { const modal = document.getElementById(id); if (modal) modal.hidden = true; };
+  document.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => closeModal(button.dataset.closeModal)));
+
+  const twoMonthsAgo = new Date();
+  twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
+  const defaultSince = twoMonthsAgo.toISOString().slice(0, 10);
+  const sinceInput = document.getElementById('chat-import-since');
+  if (sinceInput) sinceInput.value = defaultSince;
+
+  document.getElementById('custom-chat-date')?.addEventListener('change', (event) => {
+    if (sinceInput) sinceInput.disabled = !event.target.checked;
+  });
+  document.getElementById('history-all')?.addEventListener('change', (event) => {
+    const count = document.getElementById('history-count');
+    if (count) count.disabled = event.target.checked;
+  });
+  document.getElementById('import-history-btn')?.addEventListener('click', () => openModal('import-history-modal'));
+  document.getElementById('import-chats-btn')?.addEventListener('click', () => openModal('import-chats-modal'));
+
+  const monitorImportJobs = (jobIds, kind) => {
+    const timer = setInterval(async () => {
+      try {
+        const jobs = await Promise.all(jobIds.map((id) => request(`${apiBase}/history-imports/${id}/`)));
+        const failed = jobs.find((job) => job.status === 'failed');
+        if (failed) {
+          clearInterval(timer);
+          setError(failed.error || 'Не удалось загрузить историю.');
+          return;
+        }
+        if (jobs.every((job) => job.status === 'completed')) {
+          clearInterval(timer);
+          const createdMessages = jobs.reduce((sum, job) => sum + Number(job.result?.created_messages || 0), 0);
+          const createdChats = jobs.reduce((sum, job) => sum + Number(job.result?.created_chats || 0), 0);
+          if (kind === 'chats') {
+            showNotification('Чаты загружены', `Добавлено чатов: ${createdChats}, сообщений: ${createdMessages}.`, 7000);
+            await fetchChats();
+          } else {
+            showNotification('История загружена', `Добавлено сообщений: ${createdMessages}.`, 7000);
+            await fetchMessages(false);
+          }
+          setStatus('Загрузка завершена');
+        }
+      } catch (error) {
+        clearInterval(timer);
+        setError(error.message);
+      }
+    }, 2000);
+  };
+
+  document.getElementById('import-history-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!currentChatId) return;
+    const loadAll = document.getElementById('history-all')?.checked;
+    const count = Number(document.getElementById('history-count')?.value || 100);
+    try {
+      const job = await request(`${apiBase}/chats/${currentChatId}/import_history/`, {method: 'POST', body: JSON.stringify({all: loadAll, count})});
+      closeModal('import-history-modal');
+      setStatus('Загружаем прошлые сообщения…');
+      showNotification('Загрузка началась', loadAll ? 'Загружаем всю доступную историю в фоне.' : `Загружаем до ${count} сообщений в фоне.`, 5000);
+      monitorImportJobs([job.id], 'history');
+    } catch (error) { setError(error.message); }
+  });
+
+  document.getElementById('import-chats-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const custom = document.getElementById('custom-chat-date')?.checked;
+    try {
+      const result = await request(`${apiBase}/accounts/import_chats/`, {method: 'POST', body: JSON.stringify({messenger: currentMessenger, since: custom ? sinceInput?.value : defaultSince})});
+      closeModal('import-chats-modal');
+      setStatus('Загружаем личные чаты…');
+      showNotification('Загрузка началась', 'Личные чаты и по 5 последних сообщений загружаются в фоне.', 5000);
+      monitorImportJobs((result.jobs || []).map((job) => job.id), 'chats');
+    } catch (error) { setError(error.message); }
+  });
+
   const fetchChats = async () => {
     try {
       const response = await fetch(`${apiBase}/chats/`);

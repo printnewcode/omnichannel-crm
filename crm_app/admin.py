@@ -10,7 +10,7 @@ from django.urls import path, reverse
 from django.contrib import messages
 from django.utils.html import format_html
 from .models import (
-    TelegramAccount, Chat, Message, OutboundDelivery
+    TelegramAccount, Chat, Message, OutboundDelivery, HistoryImportJob
 )
 
 
@@ -595,6 +595,21 @@ class OutboundDeliveryAdmin(admin.ModelAdmin):
     search_fields = ['text', 'last_error', 'provider_message_id']
     readonly_fields = ['idempotency_key', 'attempts', 'provider_message_id', 'created_message', 'created_at', 'updated_at']
     raw_id_fields = ['chat', 'reply_to_message', 'requested_by']
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(HistoryImportJob)
+class HistoryImportJobAdmin(admin.ModelAdmin):
+    list_display = ['id', 'kind', 'status', 'account', 'chat', 'progress_current', 'created_at', 'finished_at']
+    list_filter = ['kind', 'status', 'created_at']
+    search_fields = ['account__name', 'chat__title', 'error']
+    readonly_fields = [
+        'kind', 'status', 'account', 'chat', 'requested_by', 'parameters',
+        'progress_current', 'progress_total', 'result', 'error',
+        'created_at', 'started_at', 'finished_at',
+    ]
 
     def has_add_permission(self, request):
         return False

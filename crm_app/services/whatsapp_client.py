@@ -95,6 +95,13 @@ class GreenAPIClient:
     def get_settings(self):
         return self._request('GET', 'getSettings')
 
+    def get_chats(self, count=1000):
+        return self._request('GET', 'getChats', params={'count': max(1, min(int(count), 1000))})
+
+    def get_chat_history(self, chat_id, count=100):
+        payload = {'chatId': self.normalize_chat_id(chat_id), 'count': max(1, int(count))}
+        return self._request('POST', 'getChatHistory', json=payload)
+
     def configure_webhook(self, webhook_url):
         token = (self.account.green_webhook_token or '').strip()
         if token and not token.lower().startswith(('bearer ', 'basic ')):
@@ -107,4 +114,3 @@ class GreenAPIClient:
             'outgoingAPIMessageWebhook': 'yes',
             'stateWebhook': 'yes',
         })
-

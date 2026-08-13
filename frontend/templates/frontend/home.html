@@ -6,10 +6,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Omnichannel CRM</title>
-  <link rel="stylesheet" href="{% static 'frontend/style.css' %}?v=20260812-final-audit-b" />
+  <link rel="stylesheet" href="{% static 'frontend/style.css' %}?v=20260813-history-import" />
   <!-- Material Icons -->
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
 </head>
 
 <body>
@@ -57,6 +58,7 @@
       </nav>
       <div class="sidebar-header">
         <div class="search-bar"><i class="material-icons search-icon">search</i><input type="text" placeholder="Поиск по диалогам" id="chat-search" aria-label="Поиск по диалогам"></div>
+        <button type="button" class="header-icon-button" id="import-chats-btn" title="Загрузить чаты" aria-label="Загрузить чаты"><i class="material-icons">cloud_download</i></button>
       </div>
       <div id="account-health" class="account-health" hidden></div>
       <button type="button" id="archive-toggle" class="archive-toggle" aria-pressed="false">
@@ -79,6 +81,7 @@
           <div class="chat-header-status" id="chat-status">Сообщения выбранного чата появятся здесь</div>
         </div>
         <div class="chat-header-actions">
+          <button type="button" class="history-button" id="import-history-btn" hidden><i class="material-icons">history</i><span>Загрузить прошлые сообщения</span></button>
           <div id="message-search-container" class="message-search" hidden>
             <i class="material-icons" aria-hidden="true">search</i>
             <input type="search" id="message-search-input" placeholder="Поиск в переписке" aria-label="Поиск в переписке">
@@ -133,7 +136,27 @@
     <img class="media-viewer-content" id="media-viewer-img">
     <video class="media-viewer-content" id="media-viewer-video" controls style="display: none;"></video>
   </div>
-  <script src="{% static 'frontend/app.js' %}?v=20260812-final-audit-b"></script>
+  <div id="import-history-modal" class="app-modal" hidden>
+    <div class="app-modal__backdrop" data-close-modal="import-history-modal"></div>
+    <form class="app-modal__card" id="import-history-form">
+      <div class="app-modal__header"><div><strong>Загрузить прошлые сообщения</strong><span>История аккуратно добавится в текущий диалог</span></div><button type="button" class="icon-btn" data-close-modal="import-history-modal"><i class="material-icons">close</i></button></div>
+      <label class="form-field"><span>Количество сообщений</span><input type="number" id="history-count" min="1" max="10000" value="100" required></label>
+      <label class="check-field"><input type="checkbox" id="history-all"><span>Загрузить всю доступную историю</span></label>
+      <p class="form-hint">Для WhatsApp и MAX объём истории зависит от данных, доступных GREEN-API.</p>
+      <div class="app-modal__actions"><button type="button" class="secondary-button" data-close-modal="import-history-modal">Отмена</button><button type="submit" class="primary-button">Начать загрузку</button></div>
+    </form>
+  </div>
+  <div id="import-chats-modal" class="app-modal" hidden>
+    <div class="app-modal__backdrop" data-close-modal="import-chats-modal"></div>
+    <form class="app-modal__card" id="import-chats-form">
+      <div class="app-modal__header"><div><strong>Загрузить чаты</strong><span>Только личные диалоги, по 5 последних сообщений</span></div><button type="button" class="icon-btn" data-close-modal="import-chats-modal"><i class="material-icons">close</i></button></div>
+      <label class="check-field"><input type="checkbox" id="custom-chat-date"><span>Выбрать другую начальную дату</span></label>
+      <label class="form-field"><span>Начиная с даты</span><input type="date" id="chat-import-since" disabled></label>
+      <p class="form-hint">По умолчанию загружаются активные диалоги за последние 2 месяца.</p>
+      <div class="app-modal__actions"><button type="button" class="secondary-button" data-close-modal="import-chats-modal">Отмена</button><button type="submit" class="primary-button">Загрузить</button></div>
+    </form>
+  </div>
+  <script src="{% static 'frontend/app.js' %}?v=20260813-history-import"></script>
 </body>
 
 </html>

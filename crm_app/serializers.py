@@ -3,7 +3,7 @@ Django REST Framework Serializers
 """
 from rest_framework import serializers
 from .models import (
-    TelegramAccount, Chat, Message, Operator, ChatAssignment
+    TelegramAccount, Chat, Message, Operator, ChatAssignment, HistoryImportJob
 )
 
 
@@ -175,3 +175,14 @@ class SendMessageSerializer(serializers.Serializer):
         if not data.get('text') and not paths:
             raise serializers.ValidationError('Введите текст или прикрепите хотя бы один файл.')
         return data
+
+
+class HistoryImportJobSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HistoryImportJob
+        fields = [
+            'id', 'kind', 'status', 'account_id', 'chat_id', 'parameters',
+            'progress_current', 'progress_total', 'result', 'error',
+            'created_at', 'started_at', 'finished_at',
+        ]
+        read_only_fields = fields

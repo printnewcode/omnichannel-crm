@@ -439,3 +439,35 @@ class OutboundDelivery(models.Model):
 
     def __str__(self):
         return f'OutboundDelivery {self.pk} ({self.status})'
+
+
+class HistoryImportJob(models.Model):
+    """Progress record for provider history imports executed by Celery."""
+
+    class Kind(models.TextChoices):
+        CHAT_HISTORY = 'chat_history', 'История диалога'
+        CHAT_DISCOVERY = 'chat_discovery', 'Загрузка диалогов'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Ожидает'
+        RUNNING = 'running', 'Выполняется'
+        COMPLETED = 'completed', 'Завершено'
+        FAILED = 'failed', 'Ошибка'
+
+    kind = models.CharField(max_length=30, choices=Kind.choices)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
+    account = models.ForeignKey(TelegramAccount, on_delete=models.CASCADE, related_name='history_import_jobs')
+    chat = models.ForeignKey(Chat, on_delete=models.CASCADE, related_name='history_import_jobs', null=True, blank=True)
+    requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    parameters = models.JSONField(default=dict, blank=True)
+    progress_current = models.PositiveIntegerField(default=0)
+    progress_total = models.PositiveIntegerField(null=True, blank=True)
+    result = models.JSONField(default=dict, blank=True)
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['status', 'created_at'])]

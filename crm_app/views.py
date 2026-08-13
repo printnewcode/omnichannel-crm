@@ -22,11 +22,11 @@ from django.core.exceptions import SuspiciousFileOperation
 from django.utils.text import get_valid_filename
 from django.shortcuts import redirect
 from .models import (
-    TelegramAccount, Chat, Message
+    TelegramAccount, Chat, Message, HistoryImportJob
 )
 from .serializers import (
     TelegramAccountSerializer, ChatSerializer, MessageSerializer,
-    SendMessageSerializer
+    SendMessageSerializer, HistoryImportJobSerializer
 )
 from .services.telegram_client_manager import TelegramClientManager
 from .services.message_router import MessageRouter
@@ -88,6 +88,44 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
     queryset = TelegramAccount.objects.all()
     serializer_class = TelegramAccountSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=['post'])
+    def import_chats(self, request):
+        """Queue discovery of private, non-bot chats for active accounts."""
+        from datetime import datetime, timedelta
+        from .tasks import run_history_import
+
+        messenger = request.data.get('messenger', 'telegram')
+        account_types = {
+            'telegram': [TelegramAccount.AccountType.PERSONAL],
+            'whatsapp': [TelegramAccount.AccountType.WHATSAPP],
+            'max': [TelegramAccount.AccountType.MAX],
+        }.get(messenger)
+        if not account_types:
+            return Response({'error': 'Неизвестный мессенджер.'}, status=status.HTTP_400_BAD_REQUEST)
+        since_value = request.data.get('since')
+        if since_value:
+            try:
+                since = datetime.fromisoformat(str(since_value)).date()
+                since_iso = timezone.make_aware(datetime.combine(since, datetime.min.time())).isoformat()
+            except (TypeError, ValueError):
+                return Response({'error': 'Некорректная дата.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            since_iso = (timezone.now() - timedelta(days=60)).isoformat()
+        accounts = TelegramAccount.objects.filter(account_type__in=account_types, status=TelegramAccount.AccountStatus.ACTIVE)
+        jobs = []
+        for account in accounts:
+            job = HistoryImportJob.objects.create(
+                kind=HistoryImportJob.Kind.CHAT_DISCOVERY,
+                account=account,
+                requested_by=request.user,
+                parameters={'since': since_iso, 'messages_per_chat': 5},
+            )
+            run_history_import.delay(job.id)
+            jobs.append(job)
+        if not jobs:
+            return Response({'error': 'Нет активных аккаунтов выбранного мессенджера.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'jobs': HistoryImportJobSerializer(jobs, many=True).data}, status=status.HTTP_202_ACCEPTED)
     
     @action(detail=True, methods=['post'])
     def start(self, request, pk=None):
@@ -372,6 +410,30 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = ChatSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    @action(detail=True, methods=['post'])
+    def import_history(self, request, pk=None):
+        from .tasks import run_history_import
+
+        chat = self.get_object()
+        load_all = bool(request.data.get('all'))
+        count = request.data.get('count')
+        if not load_all:
+            try:
+                count = int(count)
+            except (TypeError, ValueError):
+                return Response({'error': 'Укажите количество сообщений.'}, status=status.HTTP_400_BAD_REQUEST)
+            if count < 1 or count > 10000:
+                return Response({'error': 'Количество должно быть от 1 до 10 000.'}, status=status.HTTP_400_BAD_REQUEST)
+        job = HistoryImportJob.objects.create(
+            kind=HistoryImportJob.Kind.CHAT_HISTORY,
+            account=chat.telegram_account,
+            chat=chat,
+            requested_by=request.user,
+            parameters={'count': None if load_all else count, 'all': load_all},
+        )
+        run_history_import.delay(job.id)
+        return Response(HistoryImportJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
     def get_queryset(self):
         # Group messages remain persisted, but are intentionally hidden from the
         # operator workspace until group-chat UX is ready.
@@ -421,6 +483,14 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(_delivery_response(deliveries), status=status.HTTP_202_ACCEPTED)
 
 
+class HistoryImportJobViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = HistoryImportJobSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return HistoryImportJob.objects.filter(requested_by=self.request.user)
+
+
 class MessageViewSet(viewsets.ReadOnlyModelViewSet):
     """Просмотр сообщений и ответы без ручного назначения диалогов."""
 
@@ -446,9 +516,15 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
         messages = self.get_queryset_by_chat(chat_id)
         search_query = (request.query_params.get('search') or '').strip()
         if search_query:
-            messages = messages.filter(
-                Q(text__icontains=search_query) | Q(media_caption__icontains=search_query)
-            )
+            # MySQL and SQLite differ in Unicode case-insensitive matching.
+            # Python casefold keeps Russian search predictable on both engines.
+            folded = search_query.casefold()
+            matching_ids = [
+                message_id
+                for message_id, text, caption in messages.values_list('id', 'text', 'media_caption').iterator(chunk_size=500)
+                if folded in (text or '').casefold() or folded in (caption or '').casefold()
+            ]
+            messages = messages.filter(id__in=matching_ids)
         page = self.paginate_queryset(messages)
         if page is not None:
             return self.get_paginated_response(self.get_serializer(page, many=True).data)

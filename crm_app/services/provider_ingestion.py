@@ -28,6 +28,9 @@ def ingest_provider_message(
     metadata=None,
     chat_type=Chat.ChatType.PRIVATE,
     is_bot=False,
+    is_outgoing=False,
+    status=Message.MessageStatus.RECEIVED,
+    publish=True,
 ):
     raw_chat_id = str(external_chat_id)
     base_chat_id = raw_chat_id.split('@', 1)[0]
@@ -74,14 +77,14 @@ def ingest_provider_message(
             'telegram_id': None,
             'text': text or None,
             'message_type': message_type,
-            'status': Message.MessageStatus.RECEIVED,
+            'status': status,
             'from_user_id': (
                 int(str(sender_id).split('@', 1)[0])
                 if sender_id and str(sender_id).split('@', 1)[0].isdigit() else None
             ),
             'from_user_name': sender_name,
             'from_user_username': username,
-            'is_outgoing': False,
+            'is_outgoing': is_outgoing,
             'telegram_date': event_time,
             'media_file_id': media_file_id,
             'reply_to_message': reply_to_message,
@@ -91,9 +94,10 @@ def ingest_provider_message(
     if created:
         Chat.objects.filter(pk=chat.pk).update(
             message_count=F('message_count') + 1,
-            unread_count=F('unread_count') + 1,
+            unread_count=F('unread_count') + (0 if is_outgoing else 1),
             last_message_at=event_time,
         )
 
-    transaction.on_commit(lambda message_id=message.id: publish_message(message_id))
+    if publish:
+        transaction.on_commit(lambda message_id=message.id: publish_message(message_id))
     return message, created, chat_created
