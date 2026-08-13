@@ -5,7 +5,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from crm_app.models import Chat, HistoryImportJob, Message, TelegramAccount
-from crm_app.services.history_import import discover_green, import_green_history
+from crm_app.services.history_import import discover_green, import_green_history, import_telegram_history
 from crm_app.services.whatsapp_client import GreenAPIClient
 
 
@@ -45,6 +45,27 @@ class HistoryImportApiTests(TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(len(response.json()['jobs']), 1)
         delay.assert_called_once()
+
+
+class TelegramHistoryAsyncBoundaryTests(TestCase):
+    @patch('crm_app.services.history_import.asyncio.run')
+    def test_related_account_is_resolved_before_asyncio_starts(self, run):
+        account = TelegramAccount.objects.create(
+            name='Telegram', account_type=TelegramAccount.AccountType.PERSONAL,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            api_id=123, api_hash='hash', session_string='session',
+        )
+        chat = Chat.objects.create(
+            telegram_id=123, telegram_account=account,
+            chat_type=Chat.ChatType.PRIVATE,
+        )
+        uncached_chat = Chat.objects.get(pk=chat.pk)
+        run.return_value = (0, 0)
+
+        self.assertEqual(import_telegram_history(uncached_chat, 10), (0, 0))
+        coroutine = run.call_args.args[0]
+        coroutine.close()
+        self.assertIn('telegram_account', uncached_chat._state.fields_cache)
 
 
 class GreenHistoryImportTests(TestCase):

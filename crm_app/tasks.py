@@ -253,7 +253,9 @@ def run_history_import(job_id: int):
         discover_green, discover_telegram, import_green_history, import_telegram_history,
     )
 
-    job = HistoryImportJob.objects.select_related('account', 'chat').get(pk=job_id)
+    job = HistoryImportJob.objects.select_related(
+        'account', 'chat', 'chat__telegram_account',
+    ).get(pk=job_id)
     job.status = HistoryImportJob.Status.RUNNING
     job.started_at = timezone.now()
     job.error = ''

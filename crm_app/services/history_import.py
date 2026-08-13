@@ -150,8 +150,10 @@ async def _import_telegram_messages(client, entity, chat, count, manager):
     return created, processed
 
 
-async def _import_telegram_history(chat, count):
-    account = chat.telegram_account
+async def _import_telegram_history(chat, account, count):
+    # ``account`` is resolved before entering asyncio. Accessing the related
+    # Django object through ``chat.telegram_account`` here may trigger a lazy
+    # synchronous query and Django correctly rejects that in an async context.
     manager = TelegramClientManager()
     client = manager._create_client(StringSession(account.session_string), account.api_id, account.api_hash)
     created = 0
@@ -167,7 +169,8 @@ async def _import_telegram_history(chat, count):
 
 
 def import_telegram_history(chat, count):
-    return asyncio.run(_import_telegram_history(chat, count))
+    account = chat.telegram_account
+    return asyncio.run(_import_telegram_history(chat, account, count))
 
 
 async def _discover_telegram(account, since, per_chat):
