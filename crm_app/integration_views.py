@@ -171,7 +171,7 @@ class WhatsAppWebhookView(APIView):
                 chat_id_text = str(chat_id or '').lower()
                 if chat_id_text.endswith('@g.us'):
                     chat_type = 'group'
-                elif chat_id_text.endswith('@c.us'):
+                elif chat_id_text.endswith(('@c.us', '@lid')):
                     chat_type = 'private'
                 else:
                     logger.info('Ignored WhatsApp non-conversation chat %s on account %s', chat_id, account.id)

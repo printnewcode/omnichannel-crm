@@ -143,6 +143,28 @@ class GreenAPIWebhookTests(TestCase):
         response = self.post(payload)
         self.assertEqual(response.json()['status'], 'ignored')
 
+    def test_lid_personal_chat_is_ingested(self):
+        response = self.post({
+            'typeWebhook': 'incomingMessageReceived',
+            'instanceData': {'idInstance': 1101000001},
+            'timestamp': 1700000000,
+            'idMessage': 'green-lid-message',
+            'senderData': {
+                'chatId': '123456789012345@lid',
+                'sender': '123456789012345@lid',
+                'senderName': 'LID Contact',
+            },
+            'messageData': {
+                'typeMessage': 'textMessage',
+                'textMessageData': {'textMessage': 'Hello from LID'},
+            },
+        })
+
+        self.assertEqual(response.status_code, 200)
+        message = Message.objects.get(external_message_id='green-lid-message')
+        self.assertEqual(message.chat.chat_type, Chat.ChatType.PRIVATE)
+        self.assertEqual(message.chat.metadata['external_chat_id'], '123456789012345@lid')
+
     def test_outgoing_read_status_updates_message(self):
         chat = Chat.objects.create(telegram_id=7999, telegram_account=self.account)
         message = Message.objects.create(

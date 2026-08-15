@@ -12,4 +12,16 @@ class HistoryImportUiTests(TestCase):
         self.assertContains(response, 'id="import-history-modal"')
         self.assertContains(response, 'id="import-chats-modal"')
 
+    def test_workspace_assets_include_smooth_timeline_controls(self):
+        with open('frontend/static/frontend/app.js', encoding='utf-8') as source:
+            script = source.read()
+        with open('frontend/static/frontend/style.css', encoding='utf-8') as source:
+            styles = source.read()
+
+        self.assertIn('messageRequestVersion', script)
+        self.assertIn('rebuildMessageTimeline', script)
+        self.assertIn("divider.className = 'date-divider'", script)
+        self.assertIn('conversation-skeleton', styles)
+        self.assertIn('.date-divider', styles)
+
 # Create your tests here.

@@ -12,6 +12,7 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.pagination import PageNumberPagination
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -37,6 +38,14 @@ logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_ATTACHMENTS_PER_MESSAGE = 10
+
+
+class MessagePagination(PageNumberPagination):
+    """Allow an explicit, bounded history window for user-requested imports."""
+
+    page_size = 100
+    page_size_query_param = 'page_size'
+    max_page_size = 10000
 
 
 def _enqueue_message_batch(*, chat, text, media_paths, requested_by, reply_to_message=None):
@@ -115,6 +124,14 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
         accounts = TelegramAccount.objects.filter(account_type__in=account_types, status=TelegramAccount.AccountStatus.ACTIVE)
         jobs = []
         for account in accounts:
+            existing = HistoryImportJob.objects.filter(
+                kind=HistoryImportJob.Kind.CHAT_DISCOVERY,
+                account=account,
+                status__in=[HistoryImportJob.Status.PENDING, HistoryImportJob.Status.RUNNING],
+            ).first()
+            if existing:
+                jobs.append(existing)
+                continue
             job = HistoryImportJob.objects.create(
                 kind=HistoryImportJob.Kind.CHAT_DISCOVERY,
                 account=account,
@@ -424,6 +441,13 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'error': 'Укажите количество сообщений.'}, status=status.HTTP_400_BAD_REQUEST)
             if count < 1 or count > 10000:
                 return Response({'error': 'Количество должно быть от 1 до 10 000.'}, status=status.HTTP_400_BAD_REQUEST)
+        existing = HistoryImportJob.objects.filter(
+            kind=HistoryImportJob.Kind.CHAT_HISTORY,
+            chat=chat,
+            status__in=[HistoryImportJob.Status.PENDING, HistoryImportJob.Status.RUNNING],
+        ).first()
+        if existing:
+            return Response(HistoryImportJobSerializer(existing).data, status=status.HTTP_202_ACCEPTED)
         job = HistoryImportJob.objects.create(
             kind=HistoryImportJob.Kind.CHAT_HISTORY,
             account=chat.telegram_account,
@@ -496,6 +520,7 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
 
     serializer_class = MessageSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = MessagePagination
 
     def get_queryset(self):
         return Message.objects.filter(

@@ -435,7 +435,60 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  scroll-behavior: smooth;
+  transition: opacity .16s ease;
 }
+
+.chat-messages.is-loading { opacity: .72; }
+
+.conversation-skeleton {
+  width: 100%;
+  padding: 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.conversation-skeleton span {
+  width: min(340px, 66%);
+  height: 54px;
+  border-radius: 14px;
+  background: linear-gradient(100deg, var(--message-in) 25%, var(--item-hover) 42%, var(--message-in) 60%);
+  background-size: 260% 100%;
+  animation: conversationSkeleton 1.25s ease-in-out infinite;
+}
+.conversation-skeleton span:nth-child(even) { width: min(290px, 58%); align-self: flex-end; }
+.conversation-skeleton span:nth-child(3) { width: min(410px, 72%); }
+@keyframes conversationSkeleton { to { background-position-x: -130%; } }
+
+.date-divider {
+  align-self: stretch;
+  display: flex;
+  justify-content: center;
+  margin: 7px 0 3px;
+  pointer-events: none;
+}
+.date-divider span,
+.sticky-date {
+  padding: 5px 11px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 75%, transparent);
+  border-radius: 999px;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
+  box-shadow: 0 2px 9px rgba(0, 0, 0, .12);
+  backdrop-filter: blur(8px);
+  font-size: 12px;
+  font-weight: 650;
+}
+.sticky-date {
+  position: absolute;
+  z-index: 8;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  transition: opacity .14s ease;
+}
+.sticky-date[hidden] { display: none; }
 
 .empty-state {
   align-self: center;
@@ -467,12 +520,13 @@ body {
 }
 
 .message.animate-in {
-  animation: messageSlideIn 0.2s cubic-bezier(0.1, 0.7, 1.0, 0.1);
+  animation: messageSlideIn .16s ease-out;
 }
 
 @keyframes messageSlideIn {
   from {
-    transform: translateY(20px);
+    opacity: 0;
+    transform: translateY(6px);
   }
 
   to {

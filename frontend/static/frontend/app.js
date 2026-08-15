@@ -44,6 +44,7 @@ const getRussianError = (msg) => {
   if (errorTranslations[msg]) return errorTranslations[msg];
 
   // Check partial matches or patterns
+  if (msg.includes('HTTP 429')) return 'GREEN-API временно ограничил частоту запросов. CRM повторит запросы с паузой; подождите немного и не запускайте загрузку повторно.';
   if (msg.includes('HTTP 404')) return 'Ресурс не найден (404).';
   if (msg.includes('HTTP 500')) return 'Ошибка сервера (500).';
   if (msg.includes('HTTP 403')) return 'Доступ запрещен (403).';
@@ -170,6 +171,8 @@ let currentMessenger = localStorage.getItem("messenger") || "telegram";
 let archiveMode = false;
 let replyTarget = null;
 let contextChatId = null;
+let messageRequestVersion = 0;
+let messageFetchLimit = 100;
 
 const getChatName = (chat) => chat?.title || chat?.username || chat?.first_name || "Без имени";
 const getMessenger = (chat) => {
@@ -243,8 +246,22 @@ const renderAccountHealth = (chats) => {
   banner.append(icon, info);
 };
 
+const showConversationLoading = () => {
+  const list = document.getElementById('message-list');
+  if (!list) return;
+  list.classList.add('is-loading');
+  list.innerHTML = `
+    <div class="conversation-skeleton" aria-label="Загрузка сообщений">
+      <span></span><span></span><span></span><span></span>
+    </div>`;
+};
+
 const selectChat = (id) => {
+  const chat = allChats.find((item) => Number(item.id) === Number(id));
+  if (!chat || getMessenger(chat) !== currentMessenger || Boolean(chat.is_archived) !== archiveMode) return;
   currentChatId = id;
+  messageFetchLimit = 100;
+  messageRequestVersion += 1;
   lastRenderedMessageId = null; // Reset for scroll
   messageSearchQuery = ""; // Reset search on chat change
   clearReplyTarget();
@@ -253,8 +270,8 @@ const selectChat = (id) => {
   const searchContainer = document.getElementById("message-search-container");
   if (searchContainer) searchContainer.hidden = true;
 
-  const chat = allChats.find((item) => item.id === id);
   setActiveChat(chat);
+  showConversationLoading();
 
   // Mark locally as read immediately
   const chatLi = document.querySelector(`#chat-list .chat-item[data-chat-id="${id}"]`);
@@ -290,6 +307,21 @@ const getInitials = (name) => {
   return name ? name.substring(0, 2).toUpperCase() : "??";
 };
 
+const formatChatListTimestamp = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const today = new Date();
+  const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const startDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const days = Math.round((startToday - startDate) / 86400000);
+  if (days === 0) return date.toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
+  if (days === 1) return 'вчера';
+  if (days > 1 && days < 7) return date.toLocaleDateString('ru-RU', {weekday: 'short'}).replace('.', '');
+  return date.toLocaleDateString('ru-RU', {
+    day: '2-digit', month: '2-digit', ...(date.getFullYear() !== today.getFullYear() ? {year: '2-digit'} : {}),
+  });
+};
+
 const closeChatContextMenu = () => {
   const menu = document.getElementById('chat-context-menu');
   if (menu) menu.hidden = true;
@@ -313,34 +345,46 @@ const showChatContextMenu = (event, chat) => {
 };
 
 const resetConversation = () => {
+  messageRequestVersion += 1;
   currentChatId = null;
   lastRenderedMessageId = null;
   renderedMessageIds.clear();
   lastContentSnapshot = '';
+  messageFetchLimit = 100;
   clearReplyTarget();
   setActiveChat(null);
+  const sticky = document.getElementById('sticky-date-header');
+  if (sticky) sticky.hidden = true;
   const list = document.getElementById('message-list');
-  if (list) list.innerHTML = '<div class="empty-state"><i class="material-icons">forum</i><strong>Выберите диалог</strong><span>Здесь появится история сообщений</span></div>';
+  if (list) {
+    list.classList.remove('is-loading');
+    list.innerHTML = '<div class="empty-state"><i class="material-icons">forum</i><strong>Выберите диалог</strong><span>Здесь появится история сообщений</span></div>';
+  }
 };
 
 const setArchiveMode = (enabled) => {
   archiveMode = Boolean(enabled);
-  resetConversation();
   renderChats(allChats);
   const first = orderChats(allChats)[0];
   if (first) selectChat(first.id);
+  else resetConversation();
 };
 
 const changeChatArchiveState = async (chat) => {
   const action = chat.is_archived ? 'unarchive' : 'archive';
   try {
-    await request(`${apiBase}/chats/${chat.id}/${action}/`, {method: 'POST'});
-    chat.is_archived = !chat.is_archived;
+    const result = await request(`${apiBase}/chats/${chat.id}/${action}/`, {method: 'POST'});
+    const wasCurrent = Number(currentChatId) === Number(chat.id);
+    allChats = allChats.map((item) => Number(item.id) === Number(chat.id)
+      ? {...item, is_archived: Boolean(result.is_archived)}
+      : item);
     closeChatContextMenu();
-    if (Number(currentChatId) === Number(chat.id)) resetConversation();
     renderChats(allChats);
     const first = orderChats(allChats)[0];
-    if (!currentChatId && first) selectChat(first.id);
+    if (wasCurrent || !orderChats(allChats).some((item) => Number(item.id) === Number(currentChatId))) {
+      if (first) selectChat(first.id);
+      else resetConversation();
+    }
   } catch (error) {
     setError(error.message || 'Не удалось изменить состояние архива.');
   }
@@ -401,7 +445,7 @@ const renderChats = (chats) => {
     const time = document.createElement('span');
     time.className = 'chat-time';
     const lastDate = chat.last_message_data?.telegram_date || chat.last_message_at || chat.updated_at;
-    if (lastDate) time.textContent = new Date(lastDate).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+    if (lastDate) time.textContent = formatChatListTimestamp(lastDate);
     top.append(title, time);
     const source = document.createElement('div');
     source.className = 'chat-source-row';
@@ -516,11 +560,38 @@ const formatDateHeader = (date) => {
   const yesterday = new Date();
   yesterday.setDate(today.getDate() - 1);
 
-  if (date.toDateString() === today.toDateString()) return 'Today';
-  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  if (date.toDateString() === today.toDateString()) return 'Сегодня';
+  if (date.toDateString() === yesterday.toDateString()) return 'Вчера';
   if (date.getFullYear() !== today.getFullYear()) options.year = 'numeric';
 
-  return date.toLocaleDateString(undefined, options);
+  return date.toLocaleDateString('ru-RU', options);
+};
+
+const localDateKey = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'unknown';
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+};
+
+const rebuildMessageTimeline = (messageList, sortedMessages) => {
+  messageList.querySelectorAll('.date-divider').forEach((node) => node.remove());
+  let previousDate = null;
+  sortedMessages.forEach((message) => {
+    const node = messageList.querySelector(`.message[data-msg-id="${message.id}"]`);
+    if (!node || node.hidden) return;
+    const date = new Date(message.telegram_date);
+    const dateKey = localDateKey(message.telegram_date);
+    if (dateKey !== previousDate && dateKey !== 'unknown') {
+      const divider = document.createElement('div');
+      divider.className = 'date-divider';
+      divider.dataset.date = dateKey;
+      divider.innerHTML = `<span>${escapeHtml(formatDateHeader(date))}</span>`;
+      messageList.appendChild(divider);
+      previousDate = dateKey;
+    }
+    messageList.appendChild(node);
+  });
+  updateStickyDate();
 };
 
 // Sticky date logic
@@ -531,20 +602,27 @@ const updateStickyDate = () => {
 
   const dividers = Array.from(messageList.querySelectorAll('.date-divider'));
   let currentDivider = null;
+  const timelineTop = messageList.getBoundingClientRect().top;
 
   for (const divider of dividers) {
-    if (divider.offsetTop <= messageList.scrollTop + 80) {
+    if (divider.getBoundingClientRect().top < timelineTop - 4) {
       currentDivider = divider;
     } else {
       break;
     }
   }
 
+  const visibleDividerAtTop = dividers.some((divider) => {
+    const top = divider.getBoundingClientRect().top;
+    return top >= timelineTop - 4 && top <= timelineTop + 38;
+  });
+  if (visibleDividerAtTop) currentDivider = null;
+
   if (currentDivider) {
     stickyDateHeader.textContent = currentDivider.textContent;
-    stickyDateHeader.style.display = 'block';
+    stickyDateHeader.hidden = false;
   } else {
-    stickyDateHeader.style.display = 'none';
+    stickyDateHeader.hidden = true;
   }
 };
 
@@ -563,6 +641,10 @@ const renderMessages = (messages, forceScroll = false) => {
   }
 
   const isAtBottom = messageList.scrollHeight - messageList.scrollTop <= messageList.clientHeight + 150;
+  const anchor = !forceScroll
+    ? Array.from(messageList.querySelectorAll('.message')).find((node) => node.offsetTop + node.offsetHeight >= messageList.scrollTop)
+    : null;
+  const anchorOffset = anchor ? anchor.offsetTop - messageList.scrollTop : 0;
 
   if (forceScroll) {
     messageList.innerHTML = "";
@@ -574,6 +656,7 @@ const renderMessages = (messages, forceScroll = false) => {
     if (messageList.innerHTML === "") {
       messageList.innerHTML = '<div class="empty-state">Сообщений пока нет</div>';
     }
+    messageList.classList.remove('is-loading');
     return;
   }
 
@@ -699,8 +782,15 @@ const renderMessages = (messages, forceScroll = false) => {
     renderedMessageIds.add(msg.id);
   });
 
-  if (forceScroll || isAtBottom) {
+  rebuildMessageTimeline(messageList, sorted);
+  messageList.classList.remove('is-loading');
+
+  if (forceScroll) {
     messageList.scrollTop = messageList.scrollHeight;
+  } else if (isAtBottom) {
+    messageList.scrollTo({top: messageList.scrollHeight, behavior: 'smooth'});
+  } else if (anchor?.isConnected) {
+    messageList.scrollTop = anchor.offsetTop - anchorOffset;
   }
 };
 
@@ -862,8 +952,13 @@ document.addEventListener("DOMContentLoaded", () => {
           clearInterval(timer);
           const createdMessages = jobs.reduce((sum, job) => sum + Number(job.result?.created_messages || 0), 0);
           const createdChats = jobs.reduce((sum, job) => sum + Number(job.result?.created_chats || 0), 0);
+          const hasProviderStats = jobs.some((job) => job.result?.available_chats !== undefined);
+          const availableChats = jobs.reduce((sum, job) => sum + Number(job.result?.available_chats || 0), 0);
           if (kind === 'chats') {
-            showNotification('Чаты загружены', `Добавлено чатов: ${createdChats}, сообщений: ${createdMessages}.`, 7000);
+            const summary = hasProviderStats
+              ? `За выбранный период найдено диалогов: ${availableChats}. Добавлено новых: ${createdChats}, сообщений: ${createdMessages}.`
+              : `Добавлено чатов: ${createdChats}, сообщений: ${createdMessages}.`;
+            showNotification('Чаты загружены', summary, 7000);
             await fetchChats();
           } else {
             showNotification('История загружена', `Добавлено сообщений: ${createdMessages}.`, 7000);
@@ -885,6 +980,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const count = Number(document.getElementById('history-count')?.value || 100);
     try {
       const job = await request(`${apiBase}/chats/${currentChatId}/import_history/`, {method: 'POST', body: JSON.stringify({all: loadAll, count})});
+      messageFetchLimit = loadAll ? 10000 : Math.max(100, count);
       closeModal('import-history-modal');
       setStatus('Загружаем прошлые сообщения…');
       showNotification('Загрузка началась', loadAll ? 'Загружаем всю доступную историю в фоне.' : `Загружаем до ${count} сообщений в фоне.`, 5000);
@@ -958,9 +1054,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const fetchMessages = async (forceScroll = false) => {
     if (!currentChatId) return;
+    const requestedChatId = currentChatId;
+    const requestVersion = messageRequestVersion;
     try {
       const searchParam = messageSearchQuery ? `&search=${encodeURIComponent(messageSearchQuery)}` : "";
-      const resp = await request(`${apiBase}/messages/by_chat/?chat_id=${currentChatId}&limit=100${searchParam}`);
+      const resp = await request(`${apiBase}/messages/by_chat/?chat_id=${requestedChatId}&page_size=${messageFetchLimit}${searchParam}`);
+      if (requestVersion !== messageRequestVersion || Number(requestedChatId) !== Number(currentChatId)) return;
       const msgs = normalizeList(resp);
 
 
@@ -972,7 +1071,9 @@ document.addEventListener("DOMContentLoaded", () => {
         lastContentSnapshot = snapshot;
       }
     } catch (e) {
-      // Silent fail provided we don't spam notifications
+      if (requestVersion !== messageRequestVersion) return;
+      document.getElementById('message-list')?.classList.remove('is-loading');
+      console.error('Failed to load messages', e);
     }
   };
 
@@ -996,6 +1097,7 @@ document.addEventListener("DOMContentLoaded", () => {
     button.classList.toggle("active", isActive);
     button.setAttribute("aria-pressed", String(isActive));
     button.addEventListener("click", () => {
+      if (button.dataset.messenger === currentMessenger) return;
       currentMessenger = button.dataset.messenger;
       localStorage.setItem("messenger", currentMessenger);
       document.documentElement.dataset.messenger = currentMessenger;
@@ -1004,9 +1106,7 @@ document.addEventListener("DOMContentLoaded", () => {
         option.classList.toggle("active", active);
         option.setAttribute("aria-pressed", String(active));
       });
-      currentChatId = null;
-      renderedMessageIds.clear();
-      setActiveChat(null);
+      resetConversation();
       renderAccountHealth(allChats);
       renderChats(allChats);
       const first = orderChats(allChats)[0];

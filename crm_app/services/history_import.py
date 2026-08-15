@@ -1,7 +1,8 @@
 """Bounded, provider-neutral history import helpers."""
 
 import asyncio
-from datetime import datetime, timezone as dt_timezone
+import re
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.db.models import Max
 from django.utils import timezone
@@ -12,6 +13,8 @@ from ..models import Chat, HistoryImportJob, Message, TelegramAccount
 from .provider_ingestion import ingest_provider_message
 from .telegram_client_manager import TelegramClientManager
 from .whatsapp_client import GreenAPIClient
+WHATSAPP_PRIVATE_CHAT_RE = re.compile(r'^\d+(?:@c\.us|@lid)?$', re.IGNORECASE)
+MAX_PRIVATE_CHAT_RE = re.compile(r'^\d+$')
 
 
 MEDIA_TYPES = {
@@ -207,24 +210,74 @@ def discover_green(account, since, per_chat=5):
     chats = client.get_chats(count=1000)
     discovered = imported = 0
     media_ids = []
-    for item in chats if isinstance(chats, list) else []:
-        external_id = str(item.get('id') or '')
+    chat_items = chats if isinstance(chats, list) else []
+    chat_index = {}
+    skipped_candidates = 0
+    for item in chat_items:
+        # WhatsApp GetChats uses ``id``; MAX GetChats uses ``chatId``.
+        raw_external_id = str(item.get('chatId') or item.get('id') or '').strip()
         kind = str(item.get('type') or '').lower()
-        is_private = kind == 'user' or (account.account_type == TelegramAccount.AccountType.WHATSAPP and external_id.endswith(('@c.us', '@lid')))
-        if not external_id or not is_private:
+        if account.account_type == TelegramAccount.AccountType.MAX:
+            is_private = kind == 'user' and bool(MAX_PRIVATE_CHAT_RE.fullmatch(raw_external_id))
+        else:
+            is_private = kind == 'user' and bool(WHATSAPP_PRIVATE_CHAT_RE.fullmatch(raw_external_id))
+        if not is_private:
+            skipped_candidates += 1
             continue
-        preview = client.get_chat_history(external_id, count=per_chat)
-        if not preview:
+        external_id = client.normalize_chat_id(raw_external_id)
+        chat_index[external_id] = item
+
+    now = timezone.now()
+    effective_since = since or (now - timedelta(days=60))
+    minutes = max(1, int((now - effective_since).total_seconds() / 60) + 1)
+    if account.account_type == TelegramAccount.AccountType.MAX:
+        minutes = min(minutes, 90 * 24 * 60)
+
+    incoming = client.get_last_incoming_messages(minutes)
+    outgoing = client.get_last_outgoing_messages(minutes)
+    journal_items = [
+        item for item in [
+            *(incoming if isinstance(incoming, list) else []),
+            *(outgoing if isinstance(outgoing, list) else []),
+        ] if isinstance(item, dict)
+    ]
+    messages_by_chat = {}
+    seen_messages = set()
+    for item in journal_items:
+        raw_external_id = str(item.get('chatId') or '').strip()
+        if not raw_external_id:
             continue
-        newest = max(_green_datetime(message.get('timestamp')) for message in preview)
-        if since and newest < since:
+        external_id = client.normalize_chat_id(raw_external_id)
+        chat_info = chat_index.get(external_id, {})
+        kind = str(item.get('chatType') or chat_info.get('type') or '').lower()
+        if account.account_type == TelegramAccount.AccountType.MAX:
+            is_private = kind == 'user' and bool(MAX_PRIVATE_CHAT_RE.fullmatch(external_id))
+        else:
+            is_private = kind in {'', 'user'} and bool(WHATSAPP_PRIVATE_CHAT_RE.fullmatch(external_id))
+        if not is_private:
             continue
+        occurred_at = _green_datetime(item.get('timestamp'))
+        if effective_since and occurred_at < effective_since:
+            continue
+        message_key = (external_id, str(item.get('idMessage') or ''), str(item.get('type') or ''))
+        if not message_key[1] or message_key in seen_messages:
+            continue
+        seen_messages.add(message_key)
+        messages_by_chat.setdefault(external_id, []).append(item)
+
+    for external_id, available_messages in messages_by_chat.items():
+        chat_info = chat_index.get(external_id, {})
+        preview = sorted(
+            available_messages,
+            key=lambda message: _green_datetime(message.get('timestamp')),
+            reverse=True,
+        )[:per_chat]
         chat, was_created = Chat.objects.get_or_create(
             telegram_id=(int(external_id.split('@', 1)[0]) if external_id.split('@', 1)[0].isdigit() else int.from_bytes(__import__('hashlib').sha256(external_id.encode()).digest()[:7], 'big')),
             telegram_account=account,
             defaults={
                 'chat_type': Chat.ChatType.PRIVATE,
-                'title': item.get('name') or external_id,
+                'title': chat_info.get('name') or preview[0].get('senderContactName') or preview[0].get('senderName') or external_id,
                 'metadata': {'provider': account.account_type, 'external_chat_id': external_id},
             },
         )
@@ -234,4 +287,10 @@ def discover_green(account, since, per_chat=5):
         new, _, stickers = _ingest_green_items(chat, preview)
         imported += new
         media_ids.extend(stickers)
-    return discovered, imported, media_ids
+    stats = {
+        'available_chats': len(messages_by_chat),
+        'provider_private_chats': len(chat_index),
+        'journal_messages': len(seen_messages),
+        'skipped_provider_chats': skipped_candidates,
+    }
+    return discovered, imported, media_ids, stats

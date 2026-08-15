@@ -286,10 +286,12 @@ def run_history_import(job_id: int):
             if job.account.account_type == TelegramAccount.AccountType.PERSONAL:
                 discovered, imported = discover_telegram(job.account, since, per_chat=5)
             elif job.account.account_type in {TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX}:
-                discovered, imported, media_ids = discover_green(job.account, since, per_chat=5)
+                discovered, imported, media_ids, provider_stats = discover_green(job.account, since, per_chat=5)
             else:
                 raise ValueError('Загрузка диалогов для Telegram-ботов недоступна.')
             result = {'created_chats': discovered, 'created_messages': imported}
+            if job.account.account_type in {TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX}:
+                result.update(provider_stats)
             job.progress_current = discovered
 
         for message_id in media_ids:
