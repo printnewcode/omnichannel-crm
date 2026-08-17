@@ -32,6 +32,7 @@ class TelegramAccountAdminForm(forms.ModelForm):
 
     HELP_TEXTS = {
         'name': 'Понятное внутреннее название, например «Telegram поддержки» или «WhatsApp отдела продаж».',
+        'status': 'Статус можно изменить вручную. Для WhatsApp и MAX установите «Активен» после авторизации инстанса и настройки webhook.',
         'account_type': 'Выберите мессенджер и способ подключения. После создания тип фиксируется.',
         'phone_number': 'Номер личного Telegram-аккаунта в международном формате, например +79991234567.',
         'api_id': mark_safe(
@@ -91,7 +92,7 @@ class TelegramAccountAdmin(admin.ModelAdmin):
     save_on_top = True
     search_fields = ['name', 'phone_number', 'bot_username', 'username', 'green_api_instance_id']
     readonly_fields = [
-        'status', 'session_string', 'telegram_user_id', 'first_name', 'last_name', 'username',
+        'session_string', 'telegram_user_id', 'first_name', 'last_name', 'username',
         'last_error', 'error_count', 'created_at', 'updated_at', 'last_activity',
     ]
     actions = ['start_authentication', 'resend_code', 'request_manual_code', 'start_accounts', 'stop_accounts', 'restart_accounts', 'check_auth_status', 'terminate_sessions', 'configure_green_api_webhooks']
@@ -113,7 +114,7 @@ class TelegramAccountAdmin(admin.ModelAdmin):
     fieldsets = (
         ('Основная информация', {
             'fields': ('name', 'account_type', 'status'),
-            'description': 'Укажите название и тип подключения. Статус меняется автоматически и через действия над аккаунтом.'
+            'description': 'Укажите название, тип подключения и статус. Статус можно менять вручную; для WhatsApp и MAX выбирайте «Активен» только после авторизации и настройки webhook.'
         }),
         ('Личный аккаунт (Telethon)', {
             'fields': ('phone_number', 'api_id', 'api_hash', 'session_string'),

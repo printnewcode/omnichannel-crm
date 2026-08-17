@@ -26,16 +26,18 @@ class MessengerAccountAdminTests(TestCase):
         self.assertIn('console.green-api.com', str(form.fields['green_api_instance_id'].help_text))
         self.assertIn('без символа @', str(form.fields['bot_username'].help_text))
 
-    def test_service_fields_are_read_only_and_account_type_locks_after_creation(self):
+    def test_service_fields_are_read_only_status_is_editable_and_account_type_locks_after_creation(self):
         add_fields = set(self.model_admin.get_readonly_fields(self.request))
         self.assertTrue({
-            'status', 'session_string', 'telegram_user_id', 'first_name', 'last_name',
+            'session_string', 'telegram_user_id', 'first_name', 'last_name',
             'username', 'last_error', 'error_count', 'last_activity',
         }.issubset(add_fields))
+        self.assertNotIn('status', add_fields)
 
         account = TelegramAccount(name='Support', account_type=TelegramAccount.AccountType.PERSONAL)
         change_fields = set(self.model_admin.get_readonly_fields(self.request, account))
         self.assertIn('account_type', change_fields)
+        self.assertNotIn('status', change_fields)
 
 
 class AllMessengerConversationTests(TestCase):
