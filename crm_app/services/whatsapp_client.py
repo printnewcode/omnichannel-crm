@@ -140,6 +140,14 @@ class GreenAPIClient:
         }
         return self._request('POST', 'getChatHistory', json=payload)
 
+    def get_download_url(self, chat_id, message_id):
+        """Ask GREEN-API to generate a fresh provider-owned media link."""
+        result = self._request('POST', 'downloadFile', json={
+            'chatId': self.normalize_chat_id(chat_id),
+            'idMessage': str(message_id),
+        })
+        return result.get('downloadUrl') or result.get('downloadUrlJpeg')
+
     def get_last_incoming_messages(self, minutes):
         return self._request(
             'GET', 'lastIncomingMessages',

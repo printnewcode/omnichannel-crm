@@ -26,11 +26,17 @@ def _allowed_green_api_host(hostname, account):
     # GREEN-API signs incoming media links on provider-owned object-storage clusters.
     if re.fullmatch(r'do-media-[0-9]+\.[a-z0-9-]+\.digitaloceanspaces\.com', hostname):
         return True
-    # Official GREEN-API WhatsApp webhooks may return signed media links from
-    # sw-media.storage.greenapi.net instead of the configured API host.
-    if hostname == 'sw-media.storage.greenapi.net':
+    # Official GREEN-API WhatsApp webhooks use several CDN subdomains under
+    # this provider-owned storage zone. The exact prefix can vary by cluster.
+    if hostname == 'storage.greenapi.net' or hostname.endswith('.storage.greenapi.net'):
         return True
-    if re.fullmatch(r'(?:sw-)?media-[0-9]+\.storage\.yandexcloud\.net', hostname):
+    # MAX notifications currently use all of these official storage forms:
+    # sw-media.storage..., sw-media-3100.storage... and (for uploaded/outgoing
+    # files) sw-media-out.storage.... Older instances may omit the sw- prefix.
+    if re.fullmatch(
+        r'(?:sw-media(?:-[0-9]+|-out)?|media-[0-9]+)\.storage\.yandexcloud\.net',
+        hostname,
+    ):
         return True
     return False
 
@@ -38,15 +44,41 @@ def _allowed_green_api_host(hostname, account):
 def download_green_api_media(message):
     account = message.chat.telegram_account
     url = (message.metadata or {}).get('download_url')
-    if not url:
-        return None
-    parsed = urlparse(url)
-    if (
-        parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
-        or parsed.port not in (None, 443)
-        or not _allowed_green_api_host(parsed.hostname, account)
-    ):
-        raise ValueError('Unsafe GREEN-API media URL')
+    parsed = urlparse(url or '')
+
+    def is_safe(candidate):
+        try:
+            port = candidate.port
+        except ValueError:
+            return False
+        return bool(
+            candidate.scheme == 'https' and candidate.hostname
+            and not candidate.username and not candidate.password
+            and port in (None, 443)
+            and _allowed_green_api_host(candidate.hostname, account)
+        )
+
+    # Journal entries and older webhooks can contain an empty, expired or
+    # cluster-specific URL. Ask GREEN-API for a fresh official link before
+    # rejecting the attachment. This works for both WhatsApp and MAX.
+    if not is_safe(parsed):
+        from .whatsapp_client import GreenAPIClient
+
+        metadata = message.metadata or {}
+        external_chat_id = metadata.get('external_chat_id') or (message.chat.metadata or {}).get('external_chat_id') or message.chat.telegram_id
+        external_message_id = message.external_message_id or message.media_file_id or message.telegram_id
+        refreshed_url = None
+        if external_chat_id and external_message_id:
+            refreshed_url = GreenAPIClient(account).get_download_url(external_chat_id, external_message_id)
+        if refreshed_url:
+            url = refreshed_url
+            parsed = urlparse(url)
+            message.metadata = {**metadata, 'download_url': url}
+            message.save(update_fields=['metadata', 'updated_at'])
+
+    if not is_safe(parsed):
+        host_label = parsed.hostname or 'missing host'
+        raise ValueError(f'Unsafe GREEN-API media URL (host: {host_label})')
 
     response = requests.get(url, timeout=60, stream=True)
     response.raise_for_status()
