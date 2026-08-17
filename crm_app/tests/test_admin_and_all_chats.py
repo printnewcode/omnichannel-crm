@@ -114,13 +114,15 @@ class AllMessengerConversationTests(TestCase):
         )
         self.assertNotIn('metadata', result)
 
-    def test_chat_api_uses_real_latest_message_when_cached_date_is_stale(self):
-        Message.objects.create(
+    def test_chat_api_uses_cached_latest_message_order(self):
+        latest = Message.objects.create(
             chat=self.chats[2],
             telegram_id=93001,
             text='Фактически самое новое сообщение',
             telegram_date=timezone.now() + timedelta(minutes=1),
         )
+        self.chats[2].last_message_at = latest.telegram_date
+        self.chats[2].save(update_fields=['last_message_at'])
 
         results = self.client.get(reverse('chat-list')).json()['results']
 

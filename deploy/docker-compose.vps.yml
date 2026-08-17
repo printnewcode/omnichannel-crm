@@ -86,7 +86,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       RUN_TELETHON_CLIENTS: "0"
     mem_limit: 192m
-    cpus: "0.15"
+    cpus: "0.25"
     pids_limit: 100
     logging: *default-logging
     command: daphne -b 0.0.0.0 -p 8000 CRM.asgi:application

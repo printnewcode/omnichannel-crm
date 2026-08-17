@@ -174,7 +174,8 @@ let archiveMode = false;
 let replyTarget = null;
 let contextChatId = null;
 let messageRequestVersion = 0;
-let messageFetchLimit = 100;
+let messageFetchLimit = 50;
+let messageFetchController = null;
 let chatFetchPromise = null;
 let chatRefreshQueued = false;
 
@@ -280,7 +281,7 @@ const selectChat = (id) => {
   const chat = allChats.find((item) => Number(item.id) === Number(id));
   if (!chat || !isChatInCurrentScope(chat) || Boolean(chat.is_archived) !== archiveMode) return;
   currentChatId = id;
-  messageFetchLimit = 100;
+  messageFetchLimit = 50;
   messageRequestVersion += 1;
   lastRenderedMessageId = null; // Reset for scroll
   messageSearchQuery = ""; // Reset search on chat change
@@ -370,7 +371,7 @@ const resetConversation = () => {
   lastRenderedMessageId = null;
   renderedMessageIds.clear();
   lastContentSnapshot = '';
-  messageFetchLimit = 100;
+  messageFetchLimit = 50;
   clearReplyTarget();
   setActiveChat(null);
   const sticky = document.getElementById('sticky-date-header');
@@ -1120,11 +1121,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const fetchMessages = async (forceScroll = false) => {
     if (!currentChatId) return;
+    if (messageFetchController) messageFetchController.abort();
+    const controller = new AbortController();
+    messageFetchController = controller;
     const requestedChatId = currentChatId;
     const requestVersion = messageRequestVersion;
     try {
       const searchParam = messageSearchQuery ? `&search=${encodeURIComponent(messageSearchQuery)}` : "";
-      const resp = await request(`${apiBase}/messages/by_chat/?chat_id=${requestedChatId}&page_size=${messageFetchLimit}${searchParam}`);
+      const resp = await request(`${apiBase}/messages/by_chat/?chat_id=${requestedChatId}&page_size=${messageFetchLimit}${searchParam}`, {
+        signal: controller.signal,
+      });
       if (requestVersion !== messageRequestVersion || Number(requestedChatId) !== Number(currentChatId)) return;
       const msgs = normalizeList(resp);
 
@@ -1137,9 +1143,12 @@ document.addEventListener("DOMContentLoaded", () => {
         lastContentSnapshot = snapshot;
       }
     } catch (e) {
+      if (e.name === 'AbortError') return;
       if (requestVersion !== messageRequestVersion) return;
       document.getElementById('message-list')?.classList.remove('is-loading');
       console.error('Failed to load messages', e);
+    } finally {
+      if (messageFetchController === controller) messageFetchController = null;
     }
   };
 
@@ -1321,9 +1330,12 @@ document.addEventListener("DOMContentLoaded", () => {
     realtimeSocket = new WebSocket(`${protocol}://${window.location.host}/ws/messages/`);
 
     realtimeSocket.addEventListener("open", () => {
+      const isReconnect = reconnectAttempt > 0;
       reconnectAttempt = 0;
       clearTimeout(reconnectTimer);
-      scheduleRealtimeRefresh(currentChatId);
+      // Initial HTTP loading is already running. Refresh only after an actual
+      // reconnect so the first chats and messages are not requested twice.
+      if (isReconnect) scheduleRealtimeRefresh(currentChatId);
     });
 
     realtimeSocket.addEventListener("message", (event) => {

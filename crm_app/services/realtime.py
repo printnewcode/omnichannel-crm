@@ -7,7 +7,7 @@ from channels.layers import get_channel_layer
 from django.db import close_old_connections, connection
 
 from ..models import Chat, Message
-from ..serializers import ChatSerializer, MessageSerializer
+from ..serializers import MessageSerializer
 
 logger = logging.getLogger(__name__)
 CRM_OPERATORS_GROUP = 'crm_operators'
@@ -29,7 +29,7 @@ def publish_message(message_id: int) -> None:
         })
         async_to_sync(layer.group_send)(CRM_OPERATORS_GROUP, {
             'type': 'chat_updated',
-            'chat': ChatSerializer(message.chat).data,
+            'chat': {'id': message.chat_id},
         })
     except Message.DoesNotExist:
         logger.warning('Cannot publish missing message %s', message_id)

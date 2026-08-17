@@ -476,25 +476,24 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         # Group messages remain persisted, but are intentionally hidden from the
         # operator workspace until group-chat UX is ready.
-        latest_message = Message.objects.filter(chat_id=OuterRef('pk')).order_by('-telegram_date')
+        # last_message_at is maintained by ingestion/outbox code and indexed.
+        # Ordering by correlated subqueries forced MySQL to inspect messages
+        # for every chat before returning even the first page.
+        latest_message = Message.objects.filter(chat_id=OuterRef('pk')).order_by('-telegram_date').annotate(
+            preview=Coalesce('text', 'media_caption'),
+        )
         queryset = Chat.objects.select_related('telegram_account').filter(
             chat_type=Chat.ChatType.PRIVATE,
             is_bot=False,
         ).annotate(
-            latest_stored_message_at=Subquery(latest_message.values('telegram_date')[:1]),
-            latest_stored_message_text=Subquery(latest_message.values('text')[:1]),
-            latest_stored_message_caption=Subquery(latest_message.values('media_caption')[:1]),
-            latest_stored_message_outgoing=Subquery(latest_message.values('is_outgoing')[:1]),
+            latest_stored_message_preview=Subquery(latest_message.values('preview')[:1]),
         )
         archived = self.request.query_params.get('archived')
         if archived in {'1', 'true', 'yes'}:
             queryset = queryset.filter(is_archived=True)
         elif archived in {'0', 'false', 'no'}:
             queryset = queryset.filter(is_archived=False)
-        return queryset.order_by(
-            Coalesce('latest_stored_message_at', 'last_message_at', 'updated_at').desc(),
-            '-id',
-        )
+        return queryset.order_by('-last_message_at', '-updated_at', '-id')
 
     @action(detail=True, methods=['post'])
     def archive(self, request, pk=None):

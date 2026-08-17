@@ -219,6 +219,7 @@ class Chat(models.Model):
             models.Index(fields=['telegram_account', 'last_message_at']),
             models.Index(fields=['chat_type', 'last_message_at']),
             models.Index(fields=['chat_type', 'is_archived', 'last_message_at'], name='crm_chat_type_arch_idx'),
+            models.Index(fields=['chat_type', 'is_bot', 'last_message_at'], name='crm_chat_visible_date_idx'),
             models.Index(fields=['created_at']),
             # Составной индекс для частых запросов
             models.Index(fields=['telegram_account', 'unread_count', 'last_message_at']),
