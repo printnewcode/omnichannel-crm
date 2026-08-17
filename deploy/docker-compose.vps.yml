@@ -15,17 +15,17 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --innodb-buffer-pool-size=128M --max-connections=100 --performance-schema=OFF
     mem_limit: 288m
-    cpus: "0.15"
+    cpus: "0.25"
     pids_limit: 100
     logging: *default-logging
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
-      interval: 10s
-      timeout: 5s
+      interval: 15s
+      timeout: 15s
       retries: 20
-      start_period: 20s
+      start_period: 60s
 
   redis:
     image: redis:7-alpine
