@@ -7,7 +7,7 @@ from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 
 from .models import Chat, Message
-from .serializers import ChatSerializer, MessageSerializer
+from .serializers import MessageSerializer
 from .services.realtime import CRM_OPERATORS_GROUP
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,10 @@ class MessageConsumer(AsyncWebsocketConsumer):
         self.room_group_name = CRM_OPERATORS_GROUP
         await self.channel_layer.group_add(self.room_group_name, self.channel_name)
         await self.accept()
-        await self.send_initial_chats()
+        # The HTTP endpoint is the single source of truth for the complete chat
+        # list. Sending it again here used to perform hundreds of queries on
+        # every reconnect and could starve the single-core VPS.
+        await self.send(text_data=json.dumps({'type': 'ready'}))
 
     async def disconnect(self, close_code):
         if hasattr(self, 'room_group_name'):
@@ -43,19 +46,6 @@ class MessageConsumer(AsyncWebsocketConsumer):
         elif message_type == 'mark_as_read':
             await database_sync_to_async(self._mark_read)(data.get('chat_id'))
             await self.send(text_data=json.dumps({'type': 'chat_marked_as_read', 'chat_id': data.get('chat_id')}))
-
-    async def send_initial_chats(self):
-        chats = await database_sync_to_async(self._active_chats)()
-        await self.send(text_data=json.dumps({'type': 'initial_chats', 'chats': chats}))
-
-    @staticmethod
-    def _active_chats():
-        queryset = Chat.objects.filter(
-            is_archived=False,
-            chat_type=Chat.ChatType.PRIVATE,
-            is_bot=False,
-        ).select_related('telegram_account').order_by('-last_message_at')[:200]
-        return ChatSerializer(queryset, many=True).data
 
     @staticmethod
     def _chat_messages(chat_id):

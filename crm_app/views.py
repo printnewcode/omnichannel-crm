@@ -52,9 +52,9 @@ class MessagePagination(PageNumberPagination):
 class ChatPagination(PageNumberPagination):
     """Serve the conversation list in moderate chunks for the small VPS."""
 
-    page_size = 200
+    page_size = 100
     page_size_query_param = 'page_size'
-    max_page_size = 500
+    max_page_size = 200
 
 
 def _enqueue_message_batch(*, chat, text, media_paths, requested_by, reply_to_message=None):

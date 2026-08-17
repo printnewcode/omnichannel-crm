@@ -175,7 +175,8 @@ let replyTarget = null;
 let contextChatId = null;
 let messageRequestVersion = 0;
 let messageFetchLimit = 100;
-let chatFetchController = null;
+let chatFetchPromise = null;
+let chatRefreshQueued = false;
 
 const getChatName = (chat) => chat?.title || chat?.username || chat?.first_name || "Без имени";
 const getMessenger = (chat) => {
@@ -1031,37 +1032,56 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (error) { setError(error.message); }
   });
 
-  const fetchChats = async () => {
-    if (chatFetchController) chatFetchController.abort();
-    const controller = new AbortController();
-    chatFetchController = controller;
-    try {
-      const chats = [];
-      let nextUrl = `${apiBase}/chats/?page_size=200`;
-      const visitedPages = new Set();
-      while (nextUrl && !visitedPages.has(nextUrl)) {
-        visitedPages.add(nextUrl);
-        const response = await fetch(nextUrl, {signal: controller.signal});
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json();
-        chats.push(...normalizeList(data));
-        nextUrl = typeof data?.next === 'string' ? data.next : null;
-      }
-      if (controller.signal.aborted) return;
-      allChats = chats;
-      renderAccountHealth(chats);
-      renderChats(chats);
-      const orderedChats = orderChats(chats);
-      if (orderedChats.length > 0 && !currentChatId) {
-        selectChat(orderedChats[0].id);
-      }
-    } catch (e) {
-      if (e.name === 'AbortError') return;
-      console.error("Critical error in fetchChats:", e);
-      lastAccountsSnapshot = ""; // Reset on critical error too
-    } finally {
-      if (chatFetchController === controller) chatFetchController = null;
+  const applyFetchedChats = (chats) => {
+    allChats = chats;
+    renderAccountHealth(chats);
+    renderChats(chats);
+    const orderedChats = orderChats(chats);
+    if (orderedChats.length > 0 && !currentChatId) selectChat(orderedChats[0].id);
+  };
+
+  const fetchChats = () => {
+    // Realtime events can arrive in bursts. Never cancel an almost completed
+    // multi-page load: keep one request chain and merge the burst into one
+    // follow-up refresh.
+    if (chatFetchPromise) {
+      chatRefreshQueued = true;
+      return chatFetchPromise;
     }
+
+    chatFetchPromise = (async () => {
+      try {
+        const chats = [];
+        let nextUrl = `${apiBase}/chats/?page_size=100`;
+        const visitedPages = new Set();
+        let firstPage = true;
+        while (nextUrl && !visitedPages.has(nextUrl)) {
+          visitedPages.add(nextUrl);
+          const response = await fetch(nextUrl);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          chats.push(...normalizeList(data));
+          nextUrl = typeof data?.next === 'string' ? data.next : null;
+
+          // On first entry show useful content immediately. During later
+          // refreshes keep the existing list stable until all pages arrive.
+          if ((allChats.length === 0 && firstPage) || !nextUrl) applyFetchedChats(chats);
+          firstPage = false;
+        }
+      } catch (error) {
+        console.error("Critical error in fetchChats:", error);
+        lastAccountsSnapshot = "";
+      }
+    })();
+
+    chatFetchPromise.finally(() => {
+      chatFetchPromise = null;
+      if (chatRefreshQueued) {
+        chatRefreshQueued = false;
+        setTimeout(fetchChats, 250);
+      }
+    });
+    return chatFetchPromise;
   };
 
   window.activateAccount = async (id, name) => {
@@ -1322,8 +1342,6 @@ document.addEventListener("DOMContentLoaded", () => {
           } else if (payload.delivery?.status === "failed") {
             setError(payload.delivery.last_error || "Не удалось отправить сообщение. Повторите попытку.");
           }
-        } else if (payload.type === "initial_chats" || payload.type === "initial_chats_end") {
-          scheduleRealtimeRefresh(currentChatId);
         }
       } catch (error) {
         console.error("Invalid realtime event", error);

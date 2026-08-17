@@ -40,12 +40,21 @@ class TelegramAccountSerializer(serializers.ModelSerializer):
         }
 
 
+class ChatAccountSerializer(serializers.ModelSerializer):
+    """Only the account fields required by the conversation list."""
+
+    class Meta:
+        model = TelegramAccount
+        fields = ['id', 'name', 'account_type', 'status']
+        read_only_fields = fields
+
+
 class ChatSerializer(serializers.ModelSerializer):
     """Serializer для Chat"""
     
     chat_type_display = serializers.CharField(source='get_chat_type_display', read_only=True)
     telegram_account_name = serializers.CharField(source='telegram_account.name', read_only=True)
-    telegram_account = TelegramAccountSerializer(read_only=True)
+    telegram_account = ChatAccountSerializer(read_only=True)
     last_message_preview = serializers.SerializerMethodField()
     last_message_data = serializers.SerializerMethodField()
     
@@ -57,7 +66,7 @@ class ChatSerializer(serializers.ModelSerializer):
             'first_name', 'last_name',
             'message_count', 'unread_count', 'is_archived', 'is_bot',
             'created_at', 'updated_at', 'last_message_at',
-            'last_message_preview', 'last_message_data', 'metadata'
+            'last_message_preview', 'last_message_data'
         ]
         read_only_fields = [
             'message_count', 'unread_count', 'is_archived', 'is_bot', 'created_at', 'updated_at', 'last_message_at'

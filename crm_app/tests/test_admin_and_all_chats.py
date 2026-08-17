@@ -96,12 +96,23 @@ class AllMessengerConversationTests(TestCase):
             for index in range(202)
         ])
 
-        first = self.client.get(reverse('chat-list'), {'page_size': 200}).json()
+        first = self.client.get(reverse('chat-list'), {'page_size': 100}).json()
         second = self.client.get(first['next']).json()
+        third = self.client.get(second['next']).json()
 
         self.assertEqual(first['count'], 205)
-        self.assertEqual(len(first['results']), 200)
-        self.assertEqual(len(second['results']), 5)
+        self.assertEqual(len(first['results']), 100)
+        self.assertEqual(len(second['results']), 100)
+        self.assertEqual(len(third['results']), 5)
+
+    def test_chat_list_uses_compact_account_payload(self):
+        result = self.client.get(reverse('chat-list')).json()['results'][0]
+
+        self.assertEqual(
+            set(result['telegram_account']),
+            {'id', 'name', 'account_type', 'status'},
+        )
+        self.assertNotIn('metadata', result)
 
     def test_chat_api_uses_real_latest_message_when_cached_date_is_stale(self):
         Message.objects.create(
