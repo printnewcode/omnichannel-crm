@@ -146,7 +146,13 @@ class GreenAPIClient:
             'chatId': self.normalize_chat_id(chat_id),
             'idMessage': str(message_id),
         })
-        return result.get('downloadUrl') or result.get('downloadUrlJpeg')
+        # GREEN-API clusters return either the documented object or a JSON
+        # string containing the URL directly.
+        if isinstance(result, str):
+            return result.strip() or None
+        if isinstance(result, dict):
+            return result.get('downloadUrl') or result.get('downloadUrlJpeg') or result.get('urlFile')
+        raise GreenAPIError('GREEN-API downloadFile returned an unexpected response')
 
     def get_last_incoming_messages(self, minutes):
         return self._request(
