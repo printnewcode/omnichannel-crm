@@ -411,6 +411,17 @@ const changeChatArchiveState = async (chat) => {
   }
 };
 
+const applyChatSearchFilter = () => {
+  const query = (document.getElementById('chat-search')?.value || '').trim().toLowerCase();
+  let displayedCount = 0;
+  document.querySelectorAll('#chat-list .chat-item').forEach((item) => {
+    item.hidden = Boolean(query) && !item.dataset.searchText.includes(query);
+    if (!item.hidden) displayedCount += 1;
+  });
+  const counter = document.getElementById('chat-count');
+  if (counter) counter.textContent = String(displayedCount);
+};
+
 const renderChats = (chats) => {
   const chatList = document.getElementById('chat-list');
   const chatCount = document.getElementById('chat-count');
@@ -430,7 +441,7 @@ const renderChats = (chats) => {
   if (archiveSubtitle) archiveSubtitle.textContent = archivedCount ? `${archivedCount} ${archivedCount === 1 ? 'диалог' : 'диалогов'}` : 'Нет архивных диалогов';
   if (listTitle) listTitle.textContent = archiveMode ? 'Архив' : 'Все диалоги';
   chatList.replaceChildren();
-  if (chatCount) chatCount.textContent = String(visibleChats.length);
+  if (chatCount) chatCount.textContent = '0';
 
   if (!visibleChats.length) {
     const empty = document.createElement('li');
@@ -508,6 +519,7 @@ const renderChats = (chats) => {
     li.addEventListener('contextmenu', (event) => showChatContextMenu(event, chat));
     chatList.appendChild(li);
   });
+  applyChatSearchFilter();
 };
 // Helper to get status icon
 const getStatusIcon = (msg) => {
@@ -1266,11 +1278,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
   // Search filter (client side simple)
-  document.getElementById("chat-search")?.addEventListener("input", (e) => {
-    const val = e.target.value.trim().toLowerCase();
-    document.querySelectorAll('#chat-list .chat-item').forEach(li => {
-      li.hidden = Boolean(val) && !li.dataset.searchText.includes(val);
-    });
+  document.getElementById("chat-search")?.addEventListener("input", () => {
+    applyChatSearchFilter();
   });
 
   // Message search filter

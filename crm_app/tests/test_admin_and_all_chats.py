@@ -147,3 +147,4 @@ class AllMessengerConversationTests(TestCase):
         self.assertContains(response, 'data-messenger="all"')
         self.assertIn('messenger-badge--${messenger}', script)
         self.assertIn('messenger === "all" || getMessenger(chat) === messenger', script)
+        self.assertIn('if (!item.hidden) displayedCount += 1', script)
