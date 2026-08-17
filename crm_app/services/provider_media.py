@@ -43,7 +43,9 @@ def _allowed_green_api_host(hostname, account):
 
 def download_green_api_media(message):
     account = message.chat.telegram_account
-    url = (message.metadata or {}).get('download_url')
+    metadata = message.metadata if isinstance(message.metadata, dict) else {}
+    chat_metadata = message.chat.metadata if isinstance(message.chat.metadata, dict) else {}
+    url = metadata.get('download_url')
     parsed = urlparse(url or '')
 
     def is_safe(candidate):
@@ -64,8 +66,7 @@ def download_green_api_media(message):
     if not is_safe(parsed):
         from .whatsapp_client import GreenAPIClient
 
-        metadata = message.metadata or {}
-        external_chat_id = metadata.get('external_chat_id') or (message.chat.metadata or {}).get('external_chat_id') or message.chat.telegram_id
+        external_chat_id = metadata.get('external_chat_id') or chat_metadata.get('external_chat_id') or message.chat.telegram_id
         external_message_id = message.external_message_id or message.media_file_id or message.telegram_id
         refreshed_url = None
         if external_chat_id and external_message_id:
@@ -73,7 +74,8 @@ def download_green_api_media(message):
         if refreshed_url:
             url = refreshed_url
             parsed = urlparse(url)
-            message.metadata = {**metadata, 'download_url': url}
+            metadata = {**metadata, 'download_url': url}
+            message.metadata = metadata
             message.save(update_fields=['metadata', 'updated_at'])
 
     if not is_safe(parsed):
@@ -86,7 +88,9 @@ def download_green_api_media(message):
     if declared_size > MAX_GREEN_API_DOWNLOAD_BYTES:
         raise ValueError('GREEN-API media exceeds the 100 MB download limit')
 
-    content = (message.metadata or {}).get('provider_content') or {}
+    content = metadata.get('provider_content') or {}
+    if not isinstance(content, dict):
+        content = {}
     content_type = response.headers.get('Content-Type') or content.get('mimeType') or 'application/octet-stream'
     content_type = content_type.split(';')[0]
     supplied_name = Path(content.get('fileName') or '').name
@@ -118,6 +122,6 @@ def download_green_api_media(message):
         raise
 
     message.media_file_path = relative.as_posix()
-    message.metadata = {**(message.metadata or {}), 'media_content_type': content_type, 'media_size': written, 'original_filename': original_name}
+    message.metadata = {**metadata, 'media_content_type': content_type, 'media_size': written, 'original_filename': original_name}
     message.save(update_fields=['media_file_path', 'metadata', 'updated_at'])
     return message.media_file_path

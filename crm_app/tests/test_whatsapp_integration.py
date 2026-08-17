@@ -202,6 +202,51 @@ class GreenAPIMediaDownloadTests(TestCase):
         message.refresh_from_db()
         self.assertEqual(message.metadata['media_size'], 4)
 
+    def test_legacy_string_provider_content_does_not_break_download(self):
+        account = TelegramAccount.objects.create(
+            name='WhatsApp legacy', account_type='whatsapp', status='active',
+            green_api_instance_id='1', green_api_token='token',
+        )
+        chat = Chat.objects.create(telegram_id=7996, telegram_account=account)
+        message = Message.objects.create(
+            chat=chat, external_message_id='legacy-content', message_type='photo',
+            telegram_date='2026-01-01T00:00:00Z',
+            metadata={
+                'download_url': 'https://sw-media.storage.greenapi.net/1/legacy.jpg',
+                'provider_content': 'legacy serialized value',
+            },
+        )
+        response = Response({}, headers={'Content-Type': 'image/jpeg'}, chunks=[b'legacy-photo'])
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=Path(media_root)), patch(
+            'crm_app.services.provider_media.requests.get', return_value=response
+        ):
+            relative = download_green_api_media(message)
+            self.assertEqual((Path(media_root) / relative).read_bytes(), b'legacy-photo')
+
+    @patch(
+        'crm_app.services.whatsapp_client.GreenAPIClient.get_download_url',
+        return_value='https://sw-media.storage.greenapi.net/1/legacy-root.jpg',
+    )
+    def test_legacy_string_metadata_is_normalized(self, refresh_url):
+        account = TelegramAccount.objects.create(
+            name='WhatsApp legacy root', account_type='whatsapp', status='active',
+            green_api_instance_id='1', green_api_token='token',
+        )
+        chat = Chat.objects.create(telegram_id=7995, telegram_account=account)
+        message = Message.objects.create(
+            chat=chat, external_message_id='legacy-root', message_type='photo',
+            telegram_date='2026-01-01T00:00:00Z', metadata='legacy metadata',
+        )
+        response = Response({}, headers={'Content-Type': 'image/jpeg'}, chunks=[b'legacy-root-photo'])
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=Path(media_root)), patch(
+            'crm_app.services.provider_media.requests.get', return_value=response
+        ):
+            relative = download_green_api_media(message)
+            self.assertEqual((Path(media_root) / relative).read_bytes(), b'legacy-root-photo')
+        message.refresh_from_db()
+        self.assertIsInstance(message.metadata, dict)
+        self.assertEqual(message.metadata['download_url'], refresh_url.return_value)
+
     def test_max_yandex_cluster_media_is_allowed(self):
         account = TelegramAccount.objects.create(
             name='MAX media', account_type='max', status='active',
