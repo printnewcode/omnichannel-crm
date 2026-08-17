@@ -223,6 +223,27 @@ class GreenAPIMediaDownloadTests(TestCase):
             relative = download_green_api_media(message)
             self.assertEqual((Path(media_root) / relative).read_bytes(), b'max-video')
 
+    def test_whatsapp_official_greenapi_storage_is_allowed(self):
+        account = TelegramAccount.objects.create(
+            name='WhatsApp storage', account_type='whatsapp', status='active',
+            green_api_instance_id='1101000000', green_api_token='token',
+        )
+        chat = Chat.objects.create(telegram_id=7998, telegram_account=account)
+        message = Message.objects.create(
+            chat=chat, external_message_id='wa-media-1', message_type='photo',
+            telegram_date='2026-01-01T00:00:00Z',
+            metadata={
+                'download_url': 'https://sw-media.storage.greenapi.net/1101000000/photo.jpg',
+                'provider_content': {'fileName': 'photo.jpg'},
+            },
+        )
+        response = Response({}, headers={'Content-Type': 'image/jpeg'}, chunks=[b'whatsapp-photo'])
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=Path(media_root)), patch(
+            'crm_app.services.provider_media.requests.get', return_value=response
+        ):
+            relative = download_green_api_media(message)
+            self.assertEqual((Path(media_root) / relative).read_bytes(), b'whatsapp-photo')
+
     def test_green_api_media_rejects_unrelated_object_storage_host(self):
         account = TelegramAccount.objects.create(
             name='Unsafe media', account_type='whatsapp', status='active',

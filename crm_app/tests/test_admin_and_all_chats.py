@@ -83,6 +83,26 @@ class AllMessengerConversationTests(TestCase):
             ['max', 'whatsapp', 'personal'],
         )
 
+    def test_chat_api_paginates_large_visible_list_without_a_fifty_chat_cap(self):
+        account = self.accounts[TelegramAccount.AccountType.PERSONAL]
+        Chat.objects.bulk_create([
+            Chat(
+                telegram_id=93000 + index,
+                telegram_account=account,
+                chat_type=Chat.ChatType.PRIVATE,
+                title=f'Client {index}',
+                last_message_at=timezone.now() - timedelta(seconds=index),
+            )
+            for index in range(202)
+        ])
+
+        first = self.client.get(reverse('chat-list'), {'page_size': 200}).json()
+        second = self.client.get(first['next']).json()
+
+        self.assertEqual(first['count'], 205)
+        self.assertEqual(len(first['results']), 200)
+        self.assertEqual(len(second['results']), 5)
+
     def test_chat_api_uses_real_latest_message_when_cached_date_is_stale(self):
         Message.objects.create(
             chat=self.chats[2],

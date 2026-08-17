@@ -26,6 +26,10 @@ def _allowed_green_api_host(hostname, account):
     # GREEN-API signs incoming media links on provider-owned object-storage clusters.
     if re.fullmatch(r'do-media-[0-9]+\.[a-z0-9-]+\.digitaloceanspaces\.com', hostname):
         return True
+    # Official GREEN-API WhatsApp webhooks may return signed media links from
+    # sw-media.storage.greenapi.net instead of the configured API host.
+    if hostname == 'sw-media.storage.greenapi.net':
+        return True
     if re.fullmatch(r'(?:sw-)?media-[0-9]+\.storage\.yandexcloud\.net', hostname):
         return True
     return False

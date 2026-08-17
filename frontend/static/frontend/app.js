@@ -175,6 +175,7 @@ let replyTarget = null;
 let contextChatId = null;
 let messageRequestVersion = 0;
 let messageFetchLimit = 100;
+let chatFetchController = null;
 
 const getChatName = (chat) => chat?.title || chat?.username || chat?.first_name || "Без имени";
 const getMessenger = (chat) => {
@@ -1031,10 +1032,22 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   const fetchChats = async () => {
+    if (chatFetchController) chatFetchController.abort();
+    const controller = new AbortController();
+    chatFetchController = controller;
     try {
-      const response = await fetch(`${apiBase}/chats/`);
-      const data = await response.json();
-      const chats = normalizeList(data);
+      const chats = [];
+      let nextUrl = `${apiBase}/chats/?page_size=200`;
+      const visitedPages = new Set();
+      while (nextUrl && !visitedPages.has(nextUrl)) {
+        visitedPages.add(nextUrl);
+        const response = await fetch(nextUrl, {signal: controller.signal});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        chats.push(...normalizeList(data));
+        nextUrl = typeof data?.next === 'string' ? data.next : null;
+      }
+      if (controller.signal.aborted) return;
       allChats = chats;
       renderAccountHealth(chats);
       renderChats(chats);
@@ -1043,8 +1056,11 @@ document.addEventListener("DOMContentLoaded", () => {
         selectChat(orderedChats[0].id);
       }
     } catch (e) {
+      if (e.name === 'AbortError') return;
       console.error("Critical error in fetchChats:", e);
       lastAccountsSnapshot = ""; // Reset on critical error too
+    } finally {
+      if (chatFetchController === controller) chatFetchController = null;
     }
   };
 

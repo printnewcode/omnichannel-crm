@@ -49,6 +49,14 @@ class MessagePagination(PageNumberPagination):
     max_page_size = 10000
 
 
+class ChatPagination(PageNumberPagination):
+    """Serve the conversation list in moderate chunks for the small VPS."""
+
+    page_size = 200
+    page_size_query_param = 'page_size'
+    max_page_size = 500
+
+
 def _enqueue_message_batch(*, chat, text, media_paths, requested_by, reply_to_message=None):
     """Create one provider-neutral batch; providers consume each attachment reliably."""
     from .services.outbound_delivery import enqueue_delivery
@@ -432,6 +440,7 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
 
     serializer_class = ChatSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = ChatPagination
 
     @action(detail=True, methods=['post'])
     def import_history(self, request, pk=None):
