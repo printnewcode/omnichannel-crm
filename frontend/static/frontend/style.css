@@ -890,6 +890,14 @@ body {
   --transition-theme: 320ms cubic-bezier(.2,.8,.2,1);
 }
 
+:root[data-messenger="all"] {
+  --accent: #5266d5;
+  --accent-rgb: 82, 102, 213;
+  --accent-soft: rgba(82, 102, 213, 0.14);
+  --item-active: #5266d5;
+  --message-out: #5266d5;
+}
+
 :root[data-messenger="max"] {
   --accent: #7c5cff;
   --accent-rgb: 124, 92, 255;
@@ -983,7 +991,7 @@ body, .sidebar, .main-chat, .chat-header, .chat-input-area, .search-bar,
   margin: 4px 12px 8px;
   padding: 5px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 4px;
   border: 1px solid var(--border-color);
   border-radius: 16px;
@@ -1026,6 +1034,7 @@ body, .sidebar, .main-chat, .chat-header, .chat-input-area, .search-bar,
   font-weight: 800;
 }
 .messenger-icon .material-icons { font-size: 14px; }
+.all-icon { background: linear-gradient(135deg, #5266d5, #7b5ed7); }
 .telegram-icon { background: #229ed9; }
 .max-icon { background: linear-gradient(135deg, #9a5cff, #4c68ff); }
 .whatsapp-icon { background: #25d366; }
@@ -1122,6 +1131,22 @@ body, .sidebar, .main-chat, .chat-header, .chat-input-area, .search-bar,
   white-space: nowrap;
 }
 .chat-item.active .account-badge { background: rgba(255,255,255,.18); color: white; }
+.messenger-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+.messenger-badge .material-icons { font-size: 11px; }
+.messenger-letter-icon { font-size: 10px; font-style: normal; font-weight: 900; }
+.messenger-badge--telegram { color: #1689c2; background: rgba(34, 158, 217, .14); }
+.messenger-badge--max { color: #7c4ee4; background: rgba(124, 92, 255, .14); }
+.messenger-badge--whatsapp { color: #178c49; background: rgba(37, 211, 102, .14); }
+.chat-item.active .messenger-badge { color: white; background: rgba(255,255,255,.18); }
 .chat-item.active .chat-account-name { color: rgba(255,255,255,.8); }
 
 .unread-indicator {

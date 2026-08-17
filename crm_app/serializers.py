@@ -65,6 +65,11 @@ class ChatSerializer(serializers.ModelSerializer):
     
     def get_last_message_preview(self, obj):
         """Получить превью последнего сообщения"""
+        if hasattr(obj, 'latest_stored_message_at'):
+            if not obj.latest_stored_message_at:
+                return None
+            text = obj.latest_stored_message_text or obj.latest_stored_message_caption or '[Медиа]'
+            return text[:100]
         last_message = obj.messages.first()
         if last_message:
             text = last_message.text or last_message.media_caption or '[Медиа]'
@@ -73,6 +78,13 @@ class ChatSerializer(serializers.ModelSerializer):
 
     def get_last_message_data(self, obj):
         """Получить дату и другие данные последнего сообщения"""
+        if hasattr(obj, 'latest_stored_message_at'):
+            if not obj.latest_stored_message_at:
+                return None
+            return {
+                'telegram_date': obj.latest_stored_message_at.isoformat(),
+                'is_outgoing': bool(obj.latest_stored_message_outgoing),
+            }
         last_message = obj.messages.first()
         if last_message:
             return {

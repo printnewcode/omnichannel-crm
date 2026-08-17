@@ -14,7 +14,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import OuterRef, Q, Subquery
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.conf import settings
 from django.core.files.storage import default_storage
@@ -109,6 +110,11 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
             'telegram': [TelegramAccount.AccountType.PERSONAL],
             'whatsapp': [TelegramAccount.AccountType.WHATSAPP],
             'max': [TelegramAccount.AccountType.MAX],
+            'all': [
+                TelegramAccount.AccountType.PERSONAL,
+                TelegramAccount.AccountType.WHATSAPP,
+                TelegramAccount.AccountType.MAX,
+            ],
         }.get(messenger)
         if not account_types:
             return Response({'error': 'Неизвестный мессенджер.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -461,16 +467,25 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         # Group messages remain persisted, but are intentionally hidden from the
         # operator workspace until group-chat UX is ready.
+        latest_message = Message.objects.filter(chat_id=OuterRef('pk')).order_by('-telegram_date')
         queryset = Chat.objects.select_related('telegram_account').filter(
             chat_type=Chat.ChatType.PRIVATE,
             is_bot=False,
+        ).annotate(
+            latest_stored_message_at=Subquery(latest_message.values('telegram_date')[:1]),
+            latest_stored_message_text=Subquery(latest_message.values('text')[:1]),
+            latest_stored_message_caption=Subquery(latest_message.values('media_caption')[:1]),
+            latest_stored_message_outgoing=Subquery(latest_message.values('is_outgoing')[:1]),
         )
         archived = self.request.query_params.get('archived')
         if archived in {'1', 'true', 'yes'}:
             queryset = queryset.filter(is_archived=True)
         elif archived in {'0', 'false', 'no'}:
             queryset = queryset.filter(is_archived=False)
-        return queryset.order_by('-last_message_at')
+        return queryset.order_by(
+            Coalesce('latest_stored_message_at', 'last_message_at', 'updated_at').desc(),
+            '-id',
+        )
 
     @action(detail=True, methods=['post'])
     def archive(self, request, pk=None):

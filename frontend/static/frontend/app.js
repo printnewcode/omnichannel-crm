@@ -167,7 +167,9 @@ let lastRenderedMessageId = null;
 let currentMedia = []; // Uploaded attachments for the next send
 let messageSearchQuery = ""; // Current search query for messages
 let allChats = [];
-let currentMessenger = localStorage.getItem("messenger") || "telegram";
+const supportedMessengerViews = new Set(["all", "telegram", "max", "whatsapp"]);
+let currentMessenger = localStorage.getItem("messenger") || "all";
+if (!supportedMessengerViews.has(currentMessenger)) currentMessenger = "all";
 let archiveMode = false;
 let replyTarget = null;
 let contextChatId = null;
@@ -179,6 +181,19 @@ const getMessenger = (chat) => {
   const type = chat?.telegram_account?.account_type;
   return type === "whatsapp" || type === "max" ? type : "telegram";
 };
+const isChatInCurrentScope = (chat, messenger = currentMessenger) => (
+  messenger === "all" || getMessenger(chat) === messenger
+);
+const getMessengerLabel = (messenger) => ({
+  telegram: "Telegram",
+  max: "MAX",
+  whatsapp: "WhatsApp",
+}[messenger] || "Мессенджер");
+const getMessengerIcon = (messenger) => ({
+  telegram: "send",
+  max: "M",
+  whatsapp: "chat",
+}[messenger] || "forum");
 const getAccountType = (chat) => chat?.telegram_account?.account_type || "personal";
 const getAccountLabel = (chat) => ({
   bot: "Бот",
@@ -186,13 +201,16 @@ const getAccountLabel = (chat) => ({
   whatsapp: "WhatsApp",
   max: "MAX личный",
 }[getAccountType(chat)] || "Канал");
+const getChatActivityDate = (chat) => new Date(
+  chat?.last_message_data?.telegram_date || chat?.last_message_at || chat?.updated_at || 0
+);
 const orderChats = (chats, messenger = currentMessenger) => chats
-  .filter((chat) => getMessenger(chat) === messenger && Boolean(chat.is_archived) === archiveMode)
+  .filter((chat) => isChatInCurrentScope(chat, messenger) && Boolean(chat.is_archived) === archiveMode)
   .sort((a, b) => {
     const typeDiff = messenger === "telegram"
       ? (getAccountType(a) === "bot" ? 0 : 1) - (getAccountType(b) === "bot" ? 0 : 1)
       : 0;
-    return typeDiff || (new Date(b.last_message_at || b.updated_at || 0) - new Date(a.last_message_at || a.updated_at || 0));
+    return typeDiff || (getChatActivityDate(b) - getChatActivityDate(a));
   });
 
 const setComposerEnabled = (enabled) => {
@@ -226,7 +244,7 @@ const renderAccountHealth = (chats) => {
   const banner = document.getElementById("account-health");
   if (!banner) return;
   const uniqueAccounts = new Map();
-  chats.filter((chat) => getMessenger(chat) === currentMessenger).forEach((chat) => {
+  chats.filter((chat) => isChatInCurrentScope(chat)).forEach((chat) => {
     const account = chat.telegram_account;
     if (account && account.status !== "active") uniqueAccounts.set(String(account.id ?? account.name), account.name || "Аккаунт без названия");
   });
@@ -258,7 +276,7 @@ const showConversationLoading = () => {
 
 const selectChat = (id) => {
   const chat = allChats.find((item) => Number(item.id) === Number(id));
-  if (!chat || getMessenger(chat) !== currentMessenger || Boolean(chat.is_archived) !== archiveMode) return;
+  if (!chat || !isChatInCurrentScope(chat) || Boolean(chat.is_archived) !== archiveMode) return;
   currentChatId = id;
   messageFetchLimit = 100;
   messageRequestVersion += 1;
@@ -394,7 +412,7 @@ const renderChats = (chats) => {
   const chatList = document.getElementById('chat-list');
   const chatCount = document.getElementById('chat-count');
   if (!chatList) return;
-  const messengerChats = chats.filter((chat) => getMessenger(chat) === currentMessenger);
+  const messengerChats = chats.filter((chat) => isChatInCurrentScope(chat));
   const archivedCount = messengerChats.filter((chat) => chat.is_archived).length;
   const visibleChats = orderChats(chats);
   const archiveToggle = document.getElementById('archive-toggle');
@@ -414,7 +432,9 @@ const renderChats = (chats) => {
   if (!visibleChats.length) {
     const empty = document.createElement('li');
     empty.className = 'chat-list-empty';
-    const channel = currentMessenger === 'max' ? 'MAX' : currentMessenger === 'whatsapp' ? 'WhatsApp' : 'Telegram';
+    const channel = currentMessenger === 'all'
+      ? 'из подключённых мессенджеров'
+      : `из ${getMessengerLabel(currentMessenger)}`;
     empty.innerHTML = archiveMode
       ? '<i class="material-icons">inventory_2</i><strong>Архив пуст</strong><span>Заархивированные диалоги появятся здесь</span>'
       : `<i class="material-icons">inbox</i><strong>Нет активных диалогов</strong><span>Новые обращения ${channel} появятся здесь</span>`;
@@ -449,6 +469,16 @@ const renderChats = (chats) => {
     top.append(title, time);
     const source = document.createElement('div');
     source.className = 'chat-source-row';
+    const messenger = getMessenger(chat);
+    if (currentMessenger === 'all') {
+      const messengerBadge = document.createElement('span');
+      messengerBadge.className = `messenger-badge messenger-badge--${messenger}`;
+      const messengerIcon = document.createElement('i');
+      messengerIcon.className = messenger === 'max' ? 'messenger-letter-icon' : 'material-icons';
+      messengerIcon.textContent = getMessengerIcon(messenger);
+      messengerBadge.append(messengerIcon, document.createTextNode(getMessengerLabel(messenger)));
+      source.appendChild(messengerBadge);
+    }
     const badge = document.createElement('span');
     badge.className = `account-badge account-badge--${accountType}`;
     badge.innerHTML = `<i class="material-icons">${accountType === 'bot' ? 'smart_toy' : accountType === 'whatsapp' ? 'chat' : 'person'}</i>`;
@@ -827,7 +857,7 @@ window.downloadViaApi = async (msgId, button) => {
   const active = document.getElementById("active-chat");
   if (active) active.textContent = chat ? getChatName(chat) : "Выберите диалог";
   setStatus(chat ? getAccountLabel(chat) + " · " + (chat.telegram_account?.name || (accountType === "max" ? "MAX" : accountType === "whatsapp" ? "WhatsApp" : "Telegram")) : "Сообщения выбранного чата появятся здесь");
-  setComposerEnabled(Boolean(chat) && getMessenger(chat) === currentMessenger);
+  setComposerEnabled(Boolean(chat) && isChatInCurrentScope(chat));
   const historyButton = document.getElementById('import-history-btn');
   if (historyButton) historyButton.hidden = !chat || getAccountType(chat) === 'bot';
 };

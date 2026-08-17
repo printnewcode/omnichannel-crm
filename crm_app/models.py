@@ -10,7 +10,7 @@ import uuid
 
 
 class TelegramAccount(models.Model):
-    """Модель для хранения данных Telegram аккаунтов (личные аккаунты и боты)"""
+    """Подключение Telegram, MAX или WhatsApp к рабочему пространству CRM."""
     
     class AccountType(models.TextChoices):
         PERSONAL = 'personal', 'Telegram — личный аккаунт'
@@ -29,13 +29,15 @@ class TelegramAccount(models.Model):
     account_type = models.CharField(
         max_length=20,
         choices=AccountType.choices,
-        verbose_name="Тип аккаунта"
+        verbose_name="Тип аккаунта",
+        help_text="Определяет мессенджер и способ подключения. После создания не изменяется.",
     )
     status = models.CharField(
         max_length=20,
         choices=AccountStatus.choices,
         default=AccountStatus.INACTIVE,
-        verbose_name="Статус"
+        verbose_name="Статус",
+        help_text="Устанавливается CRM автоматически; для запуска и остановки используйте действия над аккаунтом.",
     )
     
     # Для личных аккаунтов (Telethon)
@@ -56,7 +58,8 @@ class TelegramAccount(models.Model):
     session_string = models.TextField(
         null=True,
         blank=True,
-        help_text="StringSession для Telethon"
+        verbose_name="Сессия Telegram",
+        help_text="Создаётся автоматически после успешной авторизации. Вручную не заполняется.",
     )
     pending_session_string = models.TextField(
         null=True,
@@ -132,21 +135,22 @@ class TelegramAccount(models.Model):
         null=True,
         blank=True,
         db_index=True,
-        verbose_name="Telegram User ID"
+        verbose_name="ID пользователя Telegram",
+        help_text="Определяется автоматически после подключения.",
     )
-    first_name = models.CharField(max_length=255, null=True, blank=True)
-    last_name = models.CharField(max_length=255, null=True, blank=True)
-    username = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    first_name = models.CharField(max_length=255, null=True, blank=True, verbose_name="Имя профиля")
+    last_name = models.CharField(max_length=255, null=True, blank=True, verbose_name="Фамилия профиля")
+    username = models.CharField(max_length=255, null=True, blank=True, db_index=True, verbose_name="Username профиля")
     
     # Временные метки
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    last_activity = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True, verbose_name="Создан")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Обновлён")
+    last_activity = models.DateTimeField(null=True, blank=True, verbose_name="Последняя активность")
     restart_requested_at = models.DateTimeField(null=True, blank=True, editable=False)
     
     # Ошибки и логи
-    last_error = models.TextField(null=True, blank=True)
-    error_count = models.IntegerField(default=0)
+    last_error = models.TextField(null=True, blank=True, verbose_name="Последняя ошибка")
+    error_count = models.IntegerField(default=0, verbose_name="Количество ошибок")
     
     class Meta:
         verbose_name = "Аккаунт мессенджера"
