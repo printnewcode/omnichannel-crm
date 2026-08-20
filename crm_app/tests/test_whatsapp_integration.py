@@ -322,6 +322,17 @@ class GreenAPIMediaDownloadTests(TestCase):
             with self.subTest(hostname=hostname):
                 self.assertTrue(_allowed_green_api_host(hostname, account))
 
+    def test_whatsapp_yandex_kazakhstan_media_cluster_is_allowed(self):
+        account = TelegramAccount(
+            name='WhatsApp Kazakhstan CDN', account_type='whatsapp',
+            green_api_url='https://api.green-api.com',
+            green_media_url='https://media.green-api.com',
+        )
+
+        self.assertTrue(
+            _allowed_green_api_host('media-7201.storage.yandexcloud.kz', account)
+        )
+
     @patch(
         'crm_app.services.whatsapp_client.GreenAPIClient.get_download_url',
         return_value='https://sw-media.storage.greenapi.net/1101000000/refreshed.jpg',

@@ -33,11 +33,12 @@ def _allowed_green_api_host(hostname, account):
     # this provider-owned storage zone. The exact prefix can vary by cluster.
     if hostname == 'storage.greenapi.net' or hostname.endswith('.storage.greenapi.net'):
         return True
-    # MAX notifications currently use all of these official storage forms:
+    # MAX and WhatsApp notifications currently use these provider storage forms.
+    # Some WhatsApp clusters are served from the Kazakhstan Yandex Cloud zone.
     # sw-media.storage..., sw-media-3100.storage... and (for uploaded/outgoing
     # files) sw-media-out.storage.... Older instances may omit the sw- prefix.
     if re.fullmatch(
-        r'(?:sw-media(?:-[0-9]+|-out)?|media-[0-9]+)\.storage\.yandexcloud\.net',
+        r'(?:sw-media(?:-[0-9]+|-out)?|media-[0-9]+)\.storage\.yandexcloud\.(?:net|kz)',
         hostname,
     ):
         return True
