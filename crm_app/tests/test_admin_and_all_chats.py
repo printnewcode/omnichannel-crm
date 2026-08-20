@@ -169,3 +169,5 @@ class AllMessengerConversationTests(TestCase):
         self.assertIn("page_size: '50'", script)
         self.assertIn('fetchChats({loadMore: true})', script)
         self.assertNotIn('while (nextUrl', script)
+        self.assertIn('last-chat:${currentMessenger}', script)
+        self.assertIn('/react/`,', script)

@@ -28,6 +28,16 @@ def enqueue_delivery(*, chat, text, media_path=None, reply_to_message=None, requ
     )
 
 
+def enqueue_reaction(*, message, emoji, requested_by=None):
+    return OutboundDelivery.objects.create(
+        chat=message.chat,
+        reply_to_message=message,
+        reaction_emoji=emoji,
+        requested_by=requested_by,
+        text='',
+    )
+
+
 def recover_stale_deliveries(stale_after_seconds=300):
     cutoff = timezone.now() - timedelta(seconds=stale_after_seconds)
     return OutboundDelivery.objects.filter(
@@ -66,6 +76,31 @@ def process_next_delivery():
 
     router = MessageRouter()
     try:
+        if delivery.reaction_emoji:
+            from .reactions import set_actor_reaction
+
+            if not delivery.reply_to_message_id:
+                raise RuntimeError('Reaction target is missing')
+            if not router.send_reaction(delivery.reply_to_message, delivery.reaction_emoji):
+                raise RuntimeError('Provider did not confirm reaction')
+            target = set_actor_reaction(
+                delivery.reply_to_message_id,
+                'self',
+                delivery.reaction_emoji,
+                chosen=True,
+            )
+            OutboundDelivery.objects.filter(pk=delivery.pk).update(
+                status=OutboundDelivery.Status.SENT,
+                provider_message_id=(
+                    str(target.telegram_id or target.external_message_id or target.id)
+                ),
+                last_error='',
+            )
+            delivery.refresh_from_db()
+            publish_delivery(delivery)
+            publish_message(target.id)
+            return True
+
         if delivery.reply_to_message_id:
             provider_message_id = router.send_reply(
                 delivery.reply_to_message,

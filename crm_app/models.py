@@ -418,6 +418,7 @@ class OutboundDelivery(models.Model):
     )
     text = models.TextField(blank=True)
     media_path = models.CharField(max_length=500, null=True, blank=True)
+    reaction_emoji = models.CharField(max_length=32, null=True, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
     provider_message_id = models.CharField(max_length=255, null=True, blank=True)
     attempts = models.PositiveSmallIntegerField(default=0)

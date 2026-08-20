@@ -627,6 +627,35 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return Response(_delivery_response(deliveries), status=status.HTTP_202_ACCEPTED)
 
+    @action(detail=True, methods=['post'])
+    def react(self, request, pk=None):
+        from .services.outbound_delivery import enqueue_reaction
+        from .services.reactions import normalize_reaction
+
+        message = self.get_object()
+        emoji = normalize_reaction(request.data.get('emoji'))
+        if not emoji:
+            return Response({'error': 'Выберите доступную реакцию.'}, status=status.HTTP_400_BAD_REQUEST)
+        account = message.chat.telegram_account
+        can_react = (
+            account.account_type == TelegramAccount.AccountType.PERSONAL
+            or (
+                account.account_type == TelegramAccount.AccountType.BOT
+                and account.bot_token and not account.bridge_url
+            )
+        ) and bool(message.telegram_id)
+        if not can_react:
+            return Response(
+                {'error': 'Провайдер этого мессенджера пока не поддерживает отправку реакций через API.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        delivery = enqueue_reaction(message=message, emoji=emoji, requested_by=request.user)
+        return Response({
+            'status': 'pending',
+            'delivery_id': delivery.id,
+            'emoji': emoji,
+        }, status=status.HTTP_202_ACCEPTED)
+
     @action(detail=True, methods=['get'])
     def download_media(self, request, pk=None):
         message = self.get_object()

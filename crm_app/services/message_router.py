@@ -4,6 +4,7 @@
 """
 import logging
 import asyncio
+import requests
 from typing import Optional
 from django.utils import timezone
 from django.conf import settings
@@ -22,6 +23,27 @@ class MessageRouter:
     
     def __init__(self):
         self.client_manager = TelegramClientManager()
+
+    def send_reaction(self, message: MessageModel, emoji: str) -> bool:
+        account = message.chat.telegram_account
+        if account.account_type == TelegramAccount.AccountType.PERSONAL:
+            if not message.telegram_id:
+                return False
+            return self.client_manager.send_reaction_sync(
+                account.id, message.chat.telegram_id, message.telegram_id, emoji
+            )
+        if account.account_type == TelegramAccount.AccountType.BOT and account.bot_token and not account.bridge_url:
+            response = requests.post(
+                f'https://api.telegram.org/bot{account.bot_token}/setMessageReaction',
+                json={
+                    'chat_id': message.chat.telegram_id,
+                    'message_id': message.telegram_id,
+                    'reaction': [{'type': 'emoji', 'emoji': emoji}],
+                },
+                timeout=30,
+            )
+            return bool(response.ok and (response.json() or {}).get('ok'))
+        return False
     
     async def send_reply_async(
         self,

@@ -64,7 +64,12 @@ class GreenAPIClient:
             time.sleep(min(delay + random.uniform(0.05, 0.25), 10))
         try:
             payload = response.json()
-            detail = payload.get('message') or payload.get('error') or payload
+            if isinstance(payload, dict):
+                detail = payload.get('message') or payload.get('error') or payload
+            else:
+                # Some GREEN-API clusters return a JSON string for validation
+                # and media errors. Treat it as the error body, not an object.
+                detail = payload
         except ValueError:
             detail = response.text[:500]
         raise GreenAPIError(f'GREEN-API HTTP {response.status_code}: {detail}')
@@ -151,7 +156,10 @@ class GreenAPIClient:
         if isinstance(result, str):
             return result.strip() or None
         if isinstance(result, dict):
-            return result.get('downloadUrl') or result.get('downloadUrlJpeg') or result.get('urlFile')
+            value = result.get('downloadUrl') or result.get('downloadUrlJpeg') or result.get('urlFile')
+            if isinstance(value, dict):
+                value = value.get('url') or value.get('href') or value.get('downloadUrl')
+            return value.strip() if isinstance(value, str) and value.strip() else None
         raise GreenAPIError('GREEN-API downloadFile returned an unexpected response')
 
     def get_last_incoming_messages(self, minutes):
@@ -175,6 +183,7 @@ class GreenAPIClient:
             'webhookUrlToken': token,
             'incomingWebhook': 'yes',
             'outgoingWebhook': 'yes',
+            'outgoingMessageWebhook': 'yes',
             'outgoingAPIMessageWebhook': 'yes',
             'stateWebhook': 'yes',
         })

@@ -109,6 +109,8 @@ class MessageSerializer(serializers.ModelSerializer):
     chat_title = serializers.CharField(source='chat.title', read_only=True)
     reply_to_preview = serializers.SerializerMethodField()
     media_file_name = serializers.SerializerMethodField()
+    reactions = serializers.SerializerMethodField()
+    can_react = serializers.SerializerMethodField()
     
     class Meta:
         model = Message
@@ -120,7 +122,7 @@ class MessageSerializer(serializers.ModelSerializer):
             'media_file_id', 'media_file_path', 'media_file_name', 'media_caption',
             'telegram_date', 'created_at', 'updated_at',
             'reply_to_message_id', 'reply_to_message', 'reply_to_preview',
-            'metadata'
+            'metadata', 'reactions', 'can_react'
         ]
         read_only_fields = [
             'telegram_date', 'created_at', 'updated_at'
@@ -141,6 +143,20 @@ class MessageSerializer(serializers.ModelSerializer):
             text = obj.reply_to_message.text or obj.reply_to_message.media_caption or '[Медиа]'
             return text[:100]
         return None
+
+    def get_reactions(self, obj):
+        metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+        reactions = metadata.get('reactions')
+        return reactions if isinstance(reactions, list) else []
+
+    def get_can_react(self, obj):
+        account = obj.chat.telegram_account
+        if account.account_type == TelegramAccount.AccountType.PERSONAL:
+            return bool(obj.telegram_id)
+        return bool(
+            account.account_type == TelegramAccount.AccountType.BOT
+            and account.bot_token and not account.bridge_url and obj.telegram_id
+        )
 
 
 class OperatorSerializer(serializers.ModelSerializer):

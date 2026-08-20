@@ -93,10 +93,14 @@ class WhatsAppWebhookView(APIView):
 
     @staticmethod
     def _content(message_data):
+        message_data = message_data if isinstance(message_data, dict) else {}
         kind = message_data.get('typeMessage', 'unknown')
         text_data = message_data.get('textMessageData') or {}
         extended = message_data.get('extendedTextMessageData') or {}
         file_data = message_data.get('fileMessageData') or message_data.get('stickerMessageData') or {}
+        text_data = text_data if isinstance(text_data, dict) else {}
+        extended = extended if isinstance(extended, dict) else {}
+        file_data = file_data if isinstance(file_data, dict) else {}
         if kind == 'textMessage':
             return text_data.get('textMessage', ''), None, text_data
         if kind in {'extendedTextMessage', 'quotedMessage'}:
@@ -111,7 +115,8 @@ class WhatsAppWebhookView(APIView):
             data = message_data.get('contactMessageData') or message_data.get('contactsArrayMessageData') or {}
             return data.get('displayName') or 'Contact', None, data
         if kind == 'reactionMessage':
-            data = message_data.get('reactionMessageData') or {}
+            data = message_data.get('reactionMessageData') or extended
+            data = data if isinstance(data, dict) else {}
             return data.get('text') or data.get('emoji') or '', None, data
         for key in ('buttonsResponseMessageData', 'templateButtonReplyMessage', 'listResponseMessageData'):
             data = message_data.get(key)
@@ -155,9 +160,35 @@ class WhatsAppWebhookView(APIView):
             return Response({'status': 'ignored', 'processed': 0})
 
         webhook_type = payload.get('typeWebhook')
+        message_data = payload.get('messageData')
+        message_data = message_data if isinstance(message_data, dict) else {}
+        if (
+            webhook_type in {'incomingMessageReceived', 'outgoingMessageReceived', 'outgoingAPIMessageReceived'}
+            and message_data.get('typeMessage') == 'reactionMessage'
+        ):
+            from .services.reactions import set_actor_reaction
+
+            sender = payload.get('senderData') or {}
+            sender = sender if isinstance(sender, dict) else {}
+            chat_id = sender.get('chatId') or sender.get('sender') or payload.get('chatId')
+            quoted = message_data.get('quotedMessage') or {}
+            quoted = quoted if isinstance(quoted, dict) else {}
+            target_id = quoted.get('idMessage') or quoted.get('stanzaId')
+            emoji, _, _ = self._content(message_data)
+            target = Message.objects.filter(
+                chat__telegram_account=account,
+                chat__metadata__external_chat_id=str(chat_id),
+                external_message_id=str(target_id),
+            ).first() if chat_id and target_id else None
+            if target:
+                actor = 'self' if webhook_type != 'incomingMessageReceived' else f"peer:{sender.get('sender') or 'remote'}"
+                target = set_actor_reaction(target.id, actor, emoji, chosen=actor == 'self')
+                publish_message(target.id)
+            return Response({'status': 'accepted', 'processed': int(bool(target))})
+
         if webhook_type == 'incomingMessageReceived':
             sender = payload.get('senderData') or {}
-            message_data = payload.get('messageData') or {}
+            sender = sender if isinstance(sender, dict) else {}
             chat_id = sender.get('chatId') or sender.get('sender')
             raw_chat_type = str(sender.get('chatType') or '').lower()
             if account.account_type == TelegramAccount.AccountType.MAX:

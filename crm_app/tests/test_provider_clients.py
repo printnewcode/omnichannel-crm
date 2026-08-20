@@ -81,6 +81,31 @@ class MaxGreenAPIClientTests(SimpleTestCase):
 
         self.assertEqual(result, 'https://sw-media.storage.greenapi.net/file.jpg')
 
+    def test_download_file_accepts_nested_url_response(self):
+        session = Mock()
+        response = Mock(ok=True)
+        response.json.return_value = {
+            'downloadUrl': {'url': 'https://storage.greenapi.net/file.jpg'},
+        }
+        session.request.return_value = response
+
+        result = GreenAPIClient(self.account(), session=session).get_download_url(
+            '10000000', 'message-3'
+        )
+
+        self.assertEqual(result, 'https://storage.greenapi.net/file.jpg')
+
+    def test_string_error_response_is_reported_without_attribute_error(self):
+        session = Mock()
+        response = Mock(ok=False, status_code=400, text='bad request')
+        response.json.return_value = 'Media is no longer available'
+        session.request.return_value = response
+
+        with self.assertRaisesRegex(Exception, 'Media is no longer available'):
+            GreenAPIClient(self.account(), session=session).get_download_url(
+                '10000000', 'missing-message'
+            )
+
 
 class TelegramProxyTests(SimpleTestCase):
     @override_settings(TELEGRAM_PROXY_URL='socks5://user:password@proxy.local:1080')
@@ -110,6 +135,21 @@ class TelegramEmojiTests(TransactionTestCase):
 
         self.assertEqual(result, 77)
         client.send_message.assert_awaited_once_with(123, 'Ответ ✅😀', reply_to=None)
+
+    def test_telegram_reaction_uses_raw_api(self):
+        manager = TelegramClientManager()
+        manager._clients.clear()
+        client = AsyncMock()
+        manager._clients[998] = client
+        try:
+            result = async_to_sync(manager.send_reaction)(998, 123, 77, '🔥')
+        finally:
+            manager._clients.clear()
+
+        self.assertTrue(result)
+        request = client.await_args.args[0]
+        self.assertEqual(request.msg_id, 77)
+        self.assertEqual(request.reaction[0].emoticon, '🔥')
 
 class TelegramHistoryCatchupTests(SimpleTestCase):
     def test_empty_history_catchup_starts_without_import_error(self):

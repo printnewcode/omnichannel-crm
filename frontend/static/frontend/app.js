@@ -284,6 +284,10 @@ const selectChat = (id) => {
   const chat = allChats.find((item) => Number(item.id) === Number(id));
   if (!chat || !isChatInCurrentScope(chat) || Boolean(chat.is_archived) !== archiveMode) return;
   currentChatId = id;
+  localStorage.setItem(
+    `last-chat:${currentMessenger}:${archiveMode ? 'archive' : 'active'}`,
+    String(id),
+  );
   messageFetchLimit = 50;
   messageRequestVersion += 1;
   lastRenderedMessageId = null; // Reset for scroll
@@ -528,6 +532,96 @@ const getStatusIcon = (msg) => {
   }
 };
 const getStatusClass = (msg) => msg?.metadata?.provider_status === 'read' ? ' status-icon--read' : '';
+const MESSAGE_REACTIONS = ['👍', '❤️', '🔥', '👏', '😁', '🎉', '😢', '🤔', '👎'];
+
+const displayReaction = (emoji) => String(emoji || '').startsWith('custom:') ? '✨' : emoji;
+
+const applyOptimisticReaction = (msg, emoji) => {
+  const reactions = (Array.isArray(msg.reactions) ? msg.reactions : []).map((item) => ({...item}));
+  if (reactions.some((item) => item.emoji === emoji && item.chosen)) return false;
+  reactions.forEach((item) => {
+    if (item.chosen) {
+      item.chosen = false;
+      item.count = Math.max(0, Number(item.count || 0) - 1);
+    }
+  });
+  let target = reactions.find((item) => item.emoji === emoji);
+  if (!target) {
+    target = {emoji, count: 0, chosen: false};
+    reactions.push(target);
+  }
+  target.count = Number(target.count || 0) + 1;
+  target.chosen = true;
+  msg.reactions = reactions.filter((item) => Number(item.count || 0) > 0);
+  return true;
+};
+
+const submitReaction = async (msg, emoji, node) => {
+  if (!msg.can_react || !applyOptimisticReaction(msg, emoji)) return;
+  updateMessageReactions(node, msg);
+  try {
+    await request(`${apiBase}/messages/${msg.id}/react/`, {
+      method: 'POST',
+      body: JSON.stringify({emoji}),
+    });
+  } catch (error) {
+    setError(error.message);
+    window.fetchMessagesGlobal?.(false);
+  }
+};
+
+const updateMessageReactions = (node, msg) => {
+  if (!node) return;
+  const row = node.querySelector('.message-reactions');
+  if (row) {
+    row.replaceChildren();
+    (Array.isArray(msg.reactions) ? msg.reactions : []).forEach((reaction) => {
+      const badge = document.createElement(msg.can_react && !String(reaction.emoji).startsWith('custom:') ? 'button' : 'span');
+      if (badge.tagName === 'BUTTON') badge.type = 'button';
+      badge.className = `message-reaction${reaction.chosen ? ' chosen' : ''}`;
+      badge.title = String(reaction.emoji).startsWith('custom:') ? 'Пользовательская реакция Telegram' : String(reaction.emoji);
+      badge.textContent = `${displayReaction(reaction.emoji)} ${Number(reaction.count || 1)}`;
+      if (badge.tagName === 'BUTTON') badge.addEventListener('click', (event) => {
+        event.stopPropagation();
+        submitReaction(msg, reaction.emoji, node);
+      });
+      row.appendChild(badge);
+    });
+    row.hidden = row.childElementCount === 0;
+  }
+
+  const picker = node.querySelector('.reaction-picker');
+  const trigger = node.querySelector('.message-reaction-button');
+  if (!msg.can_react) {
+    trigger?.remove();
+    picker?.remove();
+    return;
+  }
+  if (picker && picker.childElementCount === 0) {
+    MESSAGE_REACTIONS.forEach((emoji) => {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.textContent = emoji;
+      option.title = `Поставить реакцию ${emoji}`;
+      option.addEventListener('click', (event) => {
+        event.stopPropagation();
+        picker.hidden = true;
+        submitReaction(msg, emoji, node);
+      });
+      picker.appendChild(option);
+    });
+  }
+  if (trigger && !trigger.dataset.bound) {
+    trigger.dataset.bound = '1';
+    trigger.addEventListener('click', (event) => {
+      event.stopPropagation();
+      document.querySelectorAll('.reaction-picker').forEach((item) => {
+        if (item !== picker) item.hidden = true;
+      });
+      if (picker) picker.hidden = !picker.hidden;
+    });
+  }
+};
 
 const INLINE_IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif']);
 const getMediaTypeFromMime = (mimeType = '') => {
@@ -755,6 +849,7 @@ const renderMessages = (messages, forceScroll = false) => {
           icon.textContent = getStatusIcon(msg);
           icon.classList.toggle('status-icon--read', getStatusClass(msg).includes('status-icon--read'));
         }
+        updateMessageReactions(existing, msg);
       }
       return;
     }
@@ -806,7 +901,10 @@ const renderMessages = (messages, forceScroll = false) => {
 
     div.innerHTML = `
         <button type="button" class="message-reply-button" aria-label="Ответить" title="Ответить"><i class="material-icons">reply</i></button>
+        <button type="button" class="message-reaction-button" aria-label="Добавить реакцию" title="Добавить реакцию"><i class="material-icons">add_reaction</i></button>
+        <div class="reaction-picker" hidden></div>
         ${content}
+        <div class="message-reactions" hidden></div>
         <span class="message__time">${timeStr}
            ${msg.is_outgoing ? `<span class="status-icon${getStatusClass(msg)}">${getStatusIcon(msg)}</span>` : ''}
         </span>
@@ -814,6 +912,7 @@ const renderMessages = (messages, forceScroll = false) => {
     const replyButton = div.querySelector('.message-reply-button');
     if (String(msg.id).startsWith('delivery-')) replyButton?.remove();
     else replyButton?.addEventListener('click', () => setReplyTarget(msg));
+    updateMessageReactions(div, msg);
     div.hidden = Boolean(messageSearchQuery) && !visibleIds.has(String(msg.id));
     messageList.appendChild(div);
     div.querySelectorAll('.tgs-sticker').forEach(renderTgsSticker);
@@ -1038,12 +1137,49 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (error) { setError(error.message); }
   });
 
+  let chatRestorePromise = null;
+  const restoreChatSelection = (chats) => {
+    if (currentChatId || chatRestorePromise) return;
+    const orderedChats = orderChats(chats);
+    const search = (document.getElementById('chat-search')?.value || '').trim();
+    const storageKey = `last-chat:${currentMessenger}:${archiveMode ? 'archive' : 'active'}`;
+    const savedId = !search ? Number(localStorage.getItem(storageKey)) : 0;
+    const loaded = savedId && orderedChats.find((chat) => Number(chat.id) === savedId);
+    if (loaded) {
+      selectChat(loaded.id);
+      return;
+    }
+    if (!savedId) {
+      if (orderedChats[0]) selectChat(orderedChats[0].id);
+      return;
+    }
+
+    const generation = chatFetchGeneration;
+    chatRestorePromise = request(`${apiBase}/chats/${savedId}/`)
+      .then((chat) => {
+        if (
+          generation !== chatFetchGeneration
+          || currentChatId
+          || !isChatInCurrentScope(chat)
+          || Boolean(chat.is_archived) !== archiveMode
+        ) return;
+        allChats = [...allChats.filter((item) => Number(item.id) !== savedId), chat];
+        renderAccountHealth(allChats);
+        renderChats(allChats);
+        selectChat(chat.id);
+      })
+      .catch(() => {
+        localStorage.removeItem(storageKey);
+        if (!currentChatId && orderedChats[0]) selectChat(orderedChats[0].id);
+      })
+      .finally(() => { chatRestorePromise = null; });
+  };
+
   const applyFetchedChats = (chats) => {
     allChats = chats;
     renderAccountHealth(chats);
     renderChats(chats);
-    const orderedChats = orderChats(chats);
-    if (orderedChats.length > 0 && !currentChatId) selectChat(orderedChats[0].id);
+    restoreChatSelection(chats);
   };
 
   const getChatsUrl = () => {
@@ -1163,7 +1299,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 
       // Better snapshot: id + status + updated_at + text length + media path
-      const snapshot = msgs.map(m => `${m.id}-${m.status}-${m.updated_at}-${(m.text || '').length}-${m.media_file_path || ''}`).join('|') + `[search:${messageSearchQuery}]`;
+      const snapshot = msgs.map(m => `${m.id}-${m.status}-${m.updated_at}-${(m.text || '').length}-${m.media_file_path || ''}-${JSON.stringify(m.reactions || [])}`).join('|') + `[search:${messageSearchQuery}]`;
 
       if (snapshot !== lastContentSnapshot || forceScroll) {
         renderMessages(msgs, forceScroll);
@@ -1189,6 +1325,9 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   document.addEventListener('click', (event) => {
     if (!event.target.closest('#chat-context-menu')) closeChatContextMenu();
+    if (!event.target.closest('.reaction-picker') && !event.target.closest('.message-reaction-button')) {
+      document.querySelectorAll('.reaction-picker').forEach((picker) => { picker.hidden = true; });
+    }
   });
   window.addEventListener('blur', closeChatContextMenu);
   window.addEventListener('resize', closeChatContextMenu);

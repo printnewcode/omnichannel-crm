@@ -1361,7 +1361,7 @@ body, .sidebar, .main-chat, .chat-header, .chat-input-area, .search-bar,
 .reply-composer span { overflow: hidden; color: var(--text-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .reply-composer .icon-btn { width: 32px; height: 32px; }
 
-.message-reply-button {
+.message-reply-button, .message-reaction-button {
   position: absolute;
   top: 5px;
   right: 5px;
@@ -1378,8 +1378,27 @@ body, .sidebar, .main-chat, .chat-header, .chat-input-area, .search-bar,
   transform: translateY(2px);
   transition: opacity .14s, transform .14s, color .14s;
 }
-.message-reply-button .material-icons { font-size: 17px; }
-.message:hover .message-reply-button, .message-reply-button:focus-visible { opacity: 1; transform: none; }
-.message-reply-button:hover { color: var(--accent); }
+.message-reaction-button { right: 36px; }
+.message-reply-button .material-icons, .message-reaction-button .material-icons { font-size: 17px; }
+.message:hover .message-reply-button, .message-reply-button:focus-visible,
+.message:hover .message-reaction-button, .message-reaction-button:focus-visible { opacity: 1; transform: none; }
+.message-reply-button:hover, .message-reaction-button:hover { color: var(--accent); }
 .message { position: relative; }
-.message:has(.message-reply-button) { padding-right: 38px; }
+.message:has(.message-reaction-button) { padding-right: 68px; }
+
+.message-reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.message-reactions[hidden], .reaction-picker[hidden] { display: none; }
+.message-reaction {
+  min-height: 24px; padding: 2px 7px; border: 1px solid var(--border-color); border-radius: 999px;
+  color: var(--text-primary); background: color-mix(in srgb, var(--bg-color) 82%, transparent);
+  font: inherit; font-size: 12px; line-height: 1; cursor: default;
+}
+button.message-reaction { cursor: pointer; }
+.message-reaction.chosen { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.reaction-picker {
+  position: absolute; z-index: 15; top: 37px; right: 5px; display: flex; gap: 2px;
+  padding: 6px; border: 1px solid var(--border-color); border-radius: 13px;
+  background: var(--surface-raised); box-shadow: 0 10px 32px rgba(0,0,0,.28);
+}
+.reaction-picker button { width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent; font-size: 18px; cursor: pointer; }
+.reaction-picker button:hover { background: var(--accent-soft); transform: scale(1.08); }

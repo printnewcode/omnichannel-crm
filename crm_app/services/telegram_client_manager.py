@@ -19,7 +19,7 @@ from django.utils.text import get_valid_filename
 from django.db import close_old_connections
 from asgiref.sync import sync_to_async
 from channels.db import database_sync_to_async
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, functions, types, utils
 from telethon.network.connection.tcpobfuscated import ConnectionTcpObfuscated
 from telethon.sessions import StringSession
 from telethon.errors import (
@@ -236,6 +236,10 @@ class TelegramClientManager:
                 self._create_edit_handler(account),
                 events.MessageEdited()
             )
+            client.add_event_handler(
+                self._create_reaction_handler(account),
+                events.Raw(types.UpdateMessageReactions),
+            )
             
             # Сохранение клиента и запуск задачи прослушивания
             self._clients[account.id] = client
@@ -358,6 +362,30 @@ class TelegramClientManager:
         except Exception as e:
             logger.exception(f"Error in send_message_sync: {e}")
             return None
+
+    def send_reaction_sync(self, account_id: int, chat_id: int, message_id: int, emoji: str) -> bool:
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self.send_reaction(account_id, chat_id, message_id, emoji), loop
+        )
+        return bool(future.result(timeout=30))
+
+    async def send_reaction(self, account_id: int, chat_id: int, message_id: int, emoji: str) -> bool:
+        client = self._clients.get(account_id)
+        if not client:
+            logger.error('Client for account %s not running', account_id)
+            return False
+        try:
+            await client(functions.messages.SendReactionRequest(
+                peer=chat_id,
+                msg_id=int(message_id),
+                reaction=[types.ReactionEmoji(emoticon=emoji)],
+                big=False,
+            ))
+            return True
+        except RPCError as exc:
+            logger.error('Telegram reaction failed for message %s: %s', message_id, exc)
+            return False
     
     async def send_message(
         self,
@@ -469,6 +497,7 @@ class TelegramClientManager:
         async def handle_message(event):
             """Обработка входящих сообщений"""
             from ..models import Chat, Message as MessageModel
+            from .reactions import telegram_reaction_summary
             from channels.db import database_sync_to_async
 
             message = event.message
@@ -569,7 +598,9 @@ class TelegramClientManager:
                                 'reply_to_message': reply_to_message,
                                 'media_file_id': media_file_id,
                                 'media_caption': getattr(message, 'message', None) if message_type != 'text' else None,
-                                'metadata': {}
+                                'metadata': {
+                                    'reactions': telegram_reaction_summary(getattr(message, 'reactions', None)),
+                                }
                             }
                         )
                     except IntegrityError:
@@ -618,6 +649,31 @@ class TelegramClientManager:
                 logger.exception(f"Error handling message: {e}")
         
         return handle_message
+
+    def _create_reaction_handler(self, account: TelegramAccount):
+        async def handle_reaction(update):
+            from ..models import Chat, Message as MessageModel
+            from .reactions import set_reaction_summary, telegram_reaction_summary
+            from .realtime import publish_message
+
+            try:
+                chat_id = utils.get_peer_id(update.peer)
+                message = await database_sync_to_async(
+                    MessageModel.objects.filter(
+                        chat__telegram_account=account,
+                        chat__telegram_id=chat_id,
+                        telegram_id=update.msg_id,
+                    ).first
+                )()
+                if not message:
+                    return
+                summary = telegram_reaction_summary(update.reactions)
+                await database_sync_to_async(set_reaction_summary)(message.id, summary)
+                await database_sync_to_async(publish_message)(message.id)
+            except Exception:
+                logger.exception('Failed to process Telegram reaction update for account %s', account.id)
+
+        return handle_reaction
     
     def _get_message_type(self, message) -> str:
         """Определить тип сообщения (Telethon)"""
@@ -1920,6 +1976,7 @@ class TelegramClientManager:
                         @database_sync_to_async
                         def save_msg(message_data):
                             from django.db import IntegrityError
+                            from .reactions import telegram_reaction_summary
                             try:
                                 # Quick check if exists
                                 if MessageModel.objects.filter(telegram_id=message_data.id, chat=chat_obj).exists():
@@ -1950,7 +2007,12 @@ class TelegramClientManager:
                                     from_user_id=message_data.sender_id,
                                     from_user_name=getattr(dialog, 'title', 'Unknown'), # Fallback
                                     status=MessageModel.MessageStatus.RECEIVED,
-                                    media_caption=getattr(message_data, 'message', None) if msg_type != 'text' else None
+                                    media_caption=getattr(message_data, 'message', None) if msg_type != 'text' else None,
+                                    metadata={
+                                        'reactions': telegram_reaction_summary(
+                                            getattr(message_data, 'reactions', None)
+                                        ),
+                                    },
                                 )
                                 logger.info(f"Saved NEW message {message_data.id} in chat {chat_id} during sync")
                                 return message_obj

@@ -10,7 +10,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from crm_app.models import Chat, ChatAssignment, Message, OutboundDelivery, TelegramAccount
-from crm_app.services.outbound_delivery import enqueue_delivery, process_next_delivery
+from crm_app.services.outbound_delivery import enqueue_delivery, enqueue_reaction, process_next_delivery
 
 
 class ProviderWebhookTests(TestCase):
@@ -148,6 +148,46 @@ class ProviderWebhookTests(TestCase):
         message = Message.objects.get(external_message_id='max-group-in')
         self.assertEqual(message.chat.chat_type, Chat.ChatType.GROUP)
 
+    def test_green_api_reaction_updates_target_instead_of_creating_message(self):
+        account = TelegramAccount.objects.create(
+            name='WhatsApp', account_type=TelegramAccount.AccountType.WHATSAPP,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            green_api_instance_id='10009', green_api_token='token', green_webhook_token='hook',
+        )
+        chat = Chat.objects.create(
+            telegram_id=79990001122, telegram_account=account,
+            chat_type=Chat.ChatType.PRIVATE,
+            metadata={'external_chat_id': '79990001122@c.us'},
+        )
+        target = Message.objects.create(
+            chat=chat, external_message_id='original-message', text='Target',
+            telegram_date=timezone.now(),
+        )
+        payload = {
+            'typeWebhook': 'incomingMessageReceived',
+            'instanceData': {'idInstance': 10009},
+            'idMessage': 'reaction-event',
+            'senderData': {
+                'chatId': '79990001122@c.us', 'sender': '79990001122@c.us',
+            },
+            'messageData': {
+                'typeMessage': 'reactionMessage',
+                'extendedTextMessageData': {'text': '👍'},
+                'quotedMessage': {'stanzaId': 'original-message'},
+            },
+        }
+
+        response = self.client.post(
+            reverse('whatsapp-webhook', kwargs={'account_id': account.id}),
+            data=json.dumps(payload), content_type='application/json',
+            headers={'Authorization': 'Bearer hook'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        target.refresh_from_db()
+        self.assertEqual(target.metadata['reactions'], [{'emoji': '👍', 'count': 1, 'chosen': False}])
+        self.assertFalse(Message.objects.filter(external_message_id='reaction-event').exists())
+
 
 class OutboundDeliveryTests(TestCase):
     def setUp(self):
@@ -190,6 +230,62 @@ class OutboundDeliveryTests(TestCase):
         self.assertEqual(response.json()['status'], 'pending')
         self.assertTrue(OutboundDelivery.objects.filter(text='Queued').exists())
         send_message.assert_not_called()
+
+    def test_reaction_api_queues_telegram_reaction(self):
+        message = Message.objects.create(
+            chat=self.chat, telegram_id=44, text='React to me', telegram_date=timezone.now(),
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            reverse('message-react', kwargs={'pk': message.pk}),
+            data=json.dumps({'emoji': '🔥'}), content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 202)
+        delivery = OutboundDelivery.objects.get(pk=response.json()['delivery_id'])
+        self.assertEqual(delivery.reaction_emoji, '🔥')
+        self.assertEqual(delivery.reply_to_message, message)
+
+    @patch('crm_app.services.outbound_delivery.publish_message')
+    @patch('crm_app.services.outbound_delivery.publish_delivery')
+    @patch('crm_app.services.message_router.MessageRouter.send_reaction', return_value=True)
+    def test_connector_sends_reaction_without_creating_message(self, send_reaction, publish_delivery, publish_message):
+        message = Message.objects.create(
+            chat=self.chat, telegram_id=45, text='React to me', telegram_date=timezone.now(),
+        )
+        delivery = enqueue_reaction(message=message, emoji='👍', requested_by=self.user)
+
+        self.assertTrue(process_next_delivery())
+
+        delivery.refresh_from_db()
+        message.refresh_from_db()
+        self.assertEqual(delivery.status, OutboundDelivery.Status.SENT)
+        self.assertIsNone(delivery.created_message)
+        self.assertEqual(message.metadata['reactions'], [{'emoji': '👍', 'count': 1, 'chosen': True}])
+        send_reaction.assert_called_once_with(message, '👍')
+        publish_message.assert_called_once_with(message.id)
+
+    def test_green_api_account_rejects_outgoing_reaction(self):
+        account = TelegramAccount.objects.create(
+            name='WhatsApp', account_type=TelegramAccount.AccountType.WHATSAPP,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+        )
+        chat = Chat.objects.create(
+            telegram_id=7999, telegram_account=account, chat_type=Chat.ChatType.PRIVATE,
+        )
+        message = Message.objects.create(
+            chat=chat, external_message_id='wa-message', text='Target', telegram_date=timezone.now(),
+        )
+        self.client.force_login(self.user)
+
+        response = self.client.post(
+            reverse('message-react', kwargs={'pk': message.pk}),
+            data=json.dumps({'emoji': '👍'}), content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(OutboundDelivery.objects.filter(reply_to_message=message).exists())
 class TelegramAccountCreationTests(TestCase):
     @patch('crm_app.services.telegram_client_manager.TelegramClientManager.authenticate_account_sync')
     def test_creating_personal_account_does_not_start_mtproto_in_web_process(self, authenticate):
