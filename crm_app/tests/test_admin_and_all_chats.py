@@ -177,6 +177,35 @@ class AllMessengerConversationTests(TestCase):
 
         self.assertEqual(results[0]['id'], self.chats[2].id)
 
+    def test_message_list_omits_heavy_provider_metadata(self):
+        message = Message.objects.create(
+            chat=self.chats[1],
+            external_message_id='compact-response',
+            text='Hello',
+            telegram_date=timezone.now(),
+            metadata={
+                'provider_status': 'read',
+                'delivery_id': 42,
+                'original_filename': 'photo.jpg',
+                'reactions': [{'emoji': '👍', 'count': 1, 'chosen': False}],
+                'provider_content': {'jpegThumbnail': 'x' * 100_000},
+                'download_url': 'https://example.invalid/private.jpg',
+            },
+        )
+
+        response = self.client.get(reverse('message-by-chat'), {
+            'chat_id': self.chats[1].id,
+            'page_size': 50,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()['results'][0]
+        self.assertEqual(result['id'], message.id)
+        self.assertEqual(result['metadata'], {'provider_status': 'read', 'delivery_id': '42'})
+        self.assertEqual(result['media_file_name'], 'photo.jpg')
+        self.assertEqual(result['reactions'][0]['emoji'], '👍')
+        self.assertNotContains(response, 'jpegThumbnail')
+
     @patch('crm_app.tasks.run_history_import.delay')
     def test_all_import_queues_each_personal_provider_account(self, delay):
         response = self.client.post(

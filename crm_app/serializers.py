@@ -111,6 +111,7 @@ class MessageSerializer(serializers.ModelSerializer):
     media_file_name = serializers.SerializerMethodField()
     reactions = serializers.SerializerMethodField()
     can_react = serializers.SerializerMethodField()
+    metadata = serializers.SerializerMethodField()
     
     class Meta:
         model = Message
@@ -130,7 +131,11 @@ class MessageSerializer(serializers.ModelSerializer):
     
     def get_media_file_name(self, obj):
         """Return a user-facing original filename when it is known."""
-        original = (obj.metadata or {}).get('original_filename')
+        if hasattr(obj, 'api_original_filename'):
+            original = obj.api_original_filename
+        else:
+            metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+            original = metadata.get('original_filename')
         if original:
             return original
         if obj.media_file_path:
@@ -145,9 +150,26 @@ class MessageSerializer(serializers.ModelSerializer):
         return None
 
     def get_reactions(self, obj):
+        if hasattr(obj, 'api_reactions'):
+            return obj.api_reactions if isinstance(obj.api_reactions, list) else []
         metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
         reactions = metadata.get('reactions')
         return reactions if isinstance(reactions, list) else []
+
+    def get_metadata(self, obj):
+        """Expose only UI state; provider payloads can contain large thumbnails."""
+        if hasattr(obj, 'api_provider_status'):
+            values = {
+                'provider_status': obj.api_provider_status,
+                'delivery_id': str(obj.api_delivery_id) if obj.api_delivery_id not in (None, '') else None,
+            }
+        else:
+            source = obj.metadata if isinstance(obj.metadata, dict) else {}
+            values = {
+                'provider_status': source.get('provider_status'),
+                'delivery_id': source.get('delivery_id'),
+            }
+        return {key: value for key, value in values.items() if value not in (None, '')}
 
     def get_can_react(self, obj):
         account = obj.chat.telegram_account

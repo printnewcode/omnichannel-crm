@@ -15,7 +15,8 @@ from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from django.db import transaction
 from django.db.models import Count, OuterRef, Q, Subquery
-from django.db.models.functions import Coalesce
+from django.db.models.fields.json import KeyTextTransform, KeyTransform
+from django.db.models.functions import Coalesce, Substr
 from django.utils import timezone
 from django.conf import settings
 from django.core.files.storage import default_storage
@@ -478,6 +479,13 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
         queryset = Chat.objects.select_related('telegram_account').filter(
             chat_type=Chat.ChatType.PRIVATE,
             is_bot=False,
+        ).only(
+            'id', 'telegram_id', 'telegram_account_id', 'chat_type', 'title',
+            'username', 'first_name', 'last_name', 'message_count',
+            'unread_count', 'created_at', 'updated_at', 'last_message_at',
+            'is_archived', 'is_bot', 'telegram_account__id',
+            'telegram_account__name', 'telegram_account__account_type',
+            'telegram_account__status',
         )
         messenger = self.request.query_params.get('messenger', 'all').strip().lower()
         account_types = {
@@ -518,7 +526,7 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
         # Ordering by correlated subqueries forced MySQL to inspect messages
         # for every chat before returning even the first page.
         latest_message = Message.objects.filter(chat_id=OuterRef('pk')).order_by('-telegram_date').annotate(
-            preview=Coalesce('text', 'media_caption'),
+            preview=Substr(Coalesce('text', 'media_caption'), 1, 100),
         )
         queryset = self._visible_chats().annotate(
             latest_stored_message_preview=Subquery(latest_message.values('preview')[:1]),
@@ -584,8 +592,24 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
         return Message.objects.filter(
             chat__chat_type=Chat.ChatType.PRIVATE,
             chat__is_bot=False,
+        ).annotate(
+            api_provider_status=KeyTextTransform('provider_status', 'metadata'),
+            api_delivery_id=KeyTextTransform('delivery_id', 'metadata'),
+            api_original_filename=KeyTextTransform('original_filename', 'metadata'),
+            api_reactions=KeyTransform('reactions', 'metadata'),
         ).select_related(
             'chat', 'chat__telegram_account', 'reply_to_message'
+        ).only(
+            'id', 'telegram_id', 'external_message_id', 'chat_id',
+            'message_type', 'status', 'text', 'is_outgoing',
+            'from_user_id', 'from_user_name', 'from_user_username',
+            'media_file_id', 'media_file_path', 'media_caption',
+            'telegram_date', 'created_at', 'updated_at', 'reply_to_message_id',
+            'chat__id', 'chat__title', 'chat__telegram_account_id',
+            'chat__telegram_account__id', 'chat__telegram_account__account_type',
+            'chat__telegram_account__bot_token', 'chat__telegram_account__bridge_url',
+            'reply_to_message__id', 'reply_to_message__text',
+            'reply_to_message__media_caption',
         ).order_by('-telegram_date')
 
     def get_queryset_by_chat(self, chat_id):
