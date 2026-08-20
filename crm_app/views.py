@@ -58,7 +58,10 @@ class ChatPagination(PageNumberPagination):
     max_page_size = 100
 
 
-def _enqueue_message_batch(*, chat, text, media_paths, requested_by, reply_to_message=None):
+def _enqueue_message_batch(
+    *, chat, text, media_paths, requested_by, reply_to_message=None,
+    idempotency_key=None,
+):
     """Create one provider-neutral batch; providers consume each attachment reliably."""
     from .services.outbound_delivery import enqueue_delivery
 
@@ -70,6 +73,7 @@ def _enqueue_message_batch(*, chat, text, media_paths, requested_by, reply_to_me
                 text=text,
                 reply_to_message=reply_to_message,
                 requested_by=requested_by,
+                idempotency_key=idempotency_key,
             )]
         return [
             enqueue_delivery(
@@ -78,6 +82,10 @@ def _enqueue_message_batch(*, chat, text, media_paths, requested_by, reply_to_me
                 media_path=media_path,
                 reply_to_message=reply_to_message if index == 0 else None,
                 requested_by=requested_by,
+                idempotency_key=(
+                    uuid.uuid5(idempotency_key, f'attachment:{index}')
+                    if idempotency_key else None
+                ),
             )
             for index, media_path in enumerate(paths)
         ]
@@ -569,6 +577,7 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
             text=serializer.validated_data.get('text', ''),
             media_paths=serializer.validated_data.get('media_paths', []),
             requested_by=request.user,
+            idempotency_key=serializer.validated_data.get('idempotency_key'),
         )
         return Response(_delivery_response(deliveries), status=status.HTTP_202_ACCEPTED)
 
@@ -648,6 +657,7 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
             media_paths=serializer.validated_data.get('media_paths', []),
             reply_to_message=message,
             requested_by=request.user,
+            idempotency_key=serializer.validated_data.get('idempotency_key'),
         )
         return Response(_delivery_response(deliveries), status=status.HTTP_202_ACCEPTED)
 

@@ -216,6 +216,7 @@ class SendMessageSerializer(serializers.Serializer):
     """Validate a text message with up to ten attachments."""
 
     text = serializers.CharField(max_length=4096, required=False, allow_blank=True)
+    idempotency_key = serializers.UUIDField(required=False)
     media_path = serializers.CharField(max_length=500, required=False, allow_null=True)
     media_paths = serializers.ListField(
         child=serializers.CharField(max_length=500),

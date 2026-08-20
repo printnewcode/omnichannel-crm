@@ -135,6 +135,16 @@ const escapeHtml = (value) => {
   return element.innerHTML;
 };
 
+const createIdempotencyKey = () => {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
+
 const normalizeList = (payload) => {
   if (Array.isArray(payload)) return payload;
   if (payload && Array.isArray(payload.results)) return payload.results;
@@ -181,6 +191,7 @@ let chatRefreshQueued = false;
 let chatNextUrl = null;
 let chatArchiveCount = 0;
 let chatFetchGeneration = 0;
+let sendInFlight = false;
 
 const getChatName = (chat) => chat?.title || chat?.username || chat?.first_name || "Без имени";
 const getMessenger = (chat) => {
@@ -705,14 +716,20 @@ const localDateKey = (value) => {
   return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
 };
 
-const rebuildMessageTimeline = (messageList, sortedMessages) => {
+const rebuildMessageTimeline = (messageList) => {
   messageList.querySelectorAll('.date-divider').forEach((node) => node.remove());
+  const messageNodes = Array.from(messageList.querySelectorAll('.message')).sort((a, b) => (
+    new Date(a.dataset.messageDate || 0) - new Date(b.dataset.messageDate || 0)
+  ));
   let previousDate = null;
-  sortedMessages.forEach((message) => {
-    const node = messageList.querySelector(`.message[data-msg-id="${message.id}"]`);
-    if (!node || node.hidden) return;
-    const date = new Date(message.telegram_date);
-    const dateKey = localDateKey(message.telegram_date);
+  messageNodes.forEach((node) => {
+    const dateValue = node.dataset.messageDate;
+    const date = new Date(dateValue);
+    const dateKey = localDateKey(dateValue);
+    if (node.hidden) {
+      messageList.appendChild(node);
+      return;
+    }
     if (dateKey !== previousDate && dateKey !== 'unknown') {
       const divider = document.createElement('div');
       divider.className = 'date-divider';
@@ -832,6 +849,7 @@ const renderMessages = (messages, forceScroll = false) => {
       const pending = messageList.querySelector(`.message[data-msg-id="${syntheticId}"]`);
       if (pending) {
         pending.dataset.msgId = String(msg.id);
+        pending.dataset.messageDate = msg.telegram_date || pending.dataset.messageDate;
         pending.classList.remove('animate-in');
         pending.hidden = false;
         renderedMessageIds.delete(syntheticId);
@@ -844,6 +862,7 @@ const renderMessages = (messages, forceScroll = false) => {
       const existing = messageList.querySelector(`.message[data-msg-id="${msg.id}"]`);
       if (existing) {
         existing.hidden = false;
+        existing.dataset.messageDate = msg.telegram_date || existing.dataset.messageDate;
         const icon = existing.querySelector('.status-icon');
         if (icon) {
           icon.textContent = getStatusIcon(msg);
@@ -859,6 +878,7 @@ const renderMessages = (messages, forceScroll = false) => {
     const animateClass = (!forceScroll && renderedMessageIds.size > 0) ? "animate-in" : "";
     div.className = `message ${msg.is_outgoing ? "message--outgoing" : "message--incoming"} ${msg.message_type === 'sticker' ? 'message--sticker' : ''} ${animateClass}`;
     div.dataset.msgId = msg.id;
+    div.dataset.messageDate = msg.telegram_date || new Date().toISOString();
 
     let content = `<div class="message__text">${escapeHtml(msg.text || "")}</div>`;
     if (msg.reply_to_preview) {
@@ -919,7 +939,7 @@ const renderMessages = (messages, forceScroll = false) => {
     renderedMessageIds.add(msg.id);
   });
 
-  rebuildMessageTimeline(messageList, sorted);
+  rebuildMessageTimeline(messageList);
   messageList.classList.remove('is-loading');
 
   if (forceScroll) {
@@ -1389,17 +1409,26 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   document.getElementById("send-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (sendInFlight) return;
     const input = document.getElementById('message-input');
     const text = input.value.trim();
     if (!currentChatId || (!text && currentMedia.length === 0)) return;
 
     const pendingMedia = currentMedia.map((media) => ({...media}));
-    const payload = {text, media_paths: pendingMedia.map((media) => media.path)};
+    const idempotencyKey = createIdempotencyKey();
+    const payload = {
+      text,
+      media_paths: pendingMedia.map((media) => media.path),
+      idempotency_key: idempotencyKey,
+    };
     const selectedReply = replyTarget;
     const endpoint = selectedReply
       ? `${apiBase}/messages/${selectedReply.id}/reply/`
       : `${apiBase}/chats/${currentChatId}/send_message/`;
     try {
+      sendInFlight = true;
+      const sendButton = document.getElementById('send-button');
+      if (sendButton) sendButton.disabled = true;
       const result = await request(endpoint, {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -1426,6 +1455,10 @@ document.addEventListener("DOMContentLoaded", () => {
       renderMessages(optimistic, false);
     } catch (error) {
       setError(localizeError(error.message));
+    } finally {
+      sendInFlight = false;
+      const sendButton = document.getElementById('send-button');
+      if (sendButton) sendButton.disabled = !currentChatId;
     }
   });
   let chatSearchTimer = null;

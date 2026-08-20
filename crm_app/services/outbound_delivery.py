@@ -18,14 +18,24 @@ logger = logging.getLogger(__name__)
 RETRYABLE_STATUSES = (OutboundDelivery.Status.PENDING, OutboundDelivery.Status.RETRY)
 
 
-def enqueue_delivery(*, chat, text, media_path=None, reply_to_message=None, requested_by=None):
-    return OutboundDelivery.objects.create(
-        chat=chat,
-        text=text or '',
-        media_path=media_path,
-        reply_to_message=reply_to_message,
-        requested_by=requested_by,
+def enqueue_delivery(
+    *, chat, text, media_path=None, reply_to_message=None, requested_by=None,
+    idempotency_key=None,
+):
+    values = {
+        'chat': chat,
+        'text': text or '',
+        'media_path': media_path,
+        'reply_to_message': reply_to_message,
+        'requested_by': requested_by,
+    }
+    if idempotency_key is None:
+        return OutboundDelivery.objects.create(**values)
+    delivery, _ = OutboundDelivery.objects.get_or_create(
+        idempotency_key=idempotency_key,
+        defaults=values,
     )
+    return delivery
 
 
 def enqueue_reaction(*, message, emoji, requested_by=None):
@@ -101,7 +111,11 @@ def process_next_delivery():
             publish_message(target.id)
             return True
 
-        if delivery.reply_to_message_id:
+        if delivery.provider_message_id:
+            # The provider accepted this item before a previous connector
+            # stopped. Resume local persistence without sending it again.
+            provider_message_id = delivery.provider_message_id
+        elif delivery.reply_to_message_id:
             provider_message_id = router.send_reply(
                 delivery.reply_to_message,
                 delivery.text,
@@ -116,6 +130,13 @@ def process_next_delivery():
 
         if not provider_message_id:
             raise RuntimeError('Provider did not confirm message delivery')
+
+        # Persist the provider acknowledgement before any further database
+        # work so recovery cannot repeat an already accepted send.
+        OutboundDelivery.objects.filter(pk=delivery.pk).update(
+            provider_message_id=str(provider_message_id),
+        )
+        delivery.provider_message_id = str(provider_message_id)
 
         message = router.create_outgoing_message(
             chat=delivery.chat,
@@ -137,10 +158,11 @@ def process_next_delivery():
             **({'original_filename': Path(delivery.media_path).name} if delivery.media_path else {}),
         }
         message.save(update_fields=['metadata', 'updated_at'])
-        Chat.objects.filter(pk=delivery.chat_id).update(
-            message_count=F('message_count') + 1,
-            last_message_at=message.telegram_date,
-        )
+        if getattr(message, '_outbox_was_created', True):
+            Chat.objects.filter(pk=delivery.chat_id).update(
+                message_count=F('message_count') + 1,
+                last_message_at=message.telegram_date,
+            )
         OutboundDelivery.objects.filter(pk=delivery.pk).update(
             status=OutboundDelivery.Status.SENT,
             provider_message_id=provider_message_id,

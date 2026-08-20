@@ -375,6 +375,47 @@ class OutboundDeliveryTests(TestCase):
         sent_delivery = publish_delivery.call_args.args[0]
         self.assertEqual(sent_delivery.status, OutboundDelivery.Status.SENT)
 
+    @patch('crm_app.services.outbound_delivery.publish_message')
+    @patch('crm_app.services.outbound_delivery.publish_delivery')
+    @patch('crm_app.services.message_router.MessageRouter.send_message')
+    def test_delivery_with_saved_provider_id_is_not_sent_again(
+        self, send_message, publish_delivery, publish_message,
+    ):
+        delivery = enqueue_delivery(chat=self.chat, text='Already accepted', requested_by=self.user)
+        delivery.provider_message_id = '888'
+        delivery.save(update_fields=['provider_message_id'])
+
+        self.assertTrue(process_next_delivery())
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, OutboundDelivery.Status.SENT)
+        self.assertEqual(delivery.created_message.telegram_id, 888)
+        send_message.assert_not_called()
+
+    @patch('crm_app.services.outbound_delivery.publish_message')
+    @patch('crm_app.services.outbound_delivery.publish_delivery')
+    @patch('crm_app.services.message_router.MessageRouter.send_message', return_value=999)
+    def test_outgoing_webhook_race_reuses_existing_message(
+        self, send_message, publish_delivery, publish_message,
+    ):
+        existing = Message.objects.create(
+            chat=self.chat,
+            telegram_id=999,
+            text='Race',
+            is_outgoing=True,
+            status=Message.MessageStatus.SENT,
+            telegram_date=timezone.now(),
+        )
+        delivery = enqueue_delivery(chat=self.chat, text='Race', requested_by=self.user)
+
+        self.assertTrue(process_next_delivery())
+
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, OutboundDelivery.Status.SENT)
+        self.assertEqual(delivery.created_message_id, existing.id)
+        self.assertEqual(Message.objects.filter(chat=self.chat, telegram_id=999).count(), 1)
+        send_message.assert_called_once()
+
     def test_api_enqueues_without_contacting_provider(self):
         self.client.force_login(self.user)
         url = reverse('chat-send-message', kwargs={'pk': self.chat.pk})
@@ -388,6 +429,25 @@ class OutboundDeliveryTests(TestCase):
         self.assertEqual(response.json()['status'], 'pending')
         self.assertTrue(OutboundDelivery.objects.filter(text='Queued').exists())
         send_message.assert_not_called()
+
+    def test_repeated_api_request_with_same_key_enqueues_once(self):
+        self.client.force_login(self.user)
+        url = reverse('chat-send-message', kwargs={'pk': self.chat.pk})
+        payload = {
+            'text': 'Exactly once',
+            'idempotency_key': '7d89fd9d-c730-41c6-8759-578ed437ad26',
+        }
+
+        first = self.client.post(url, data=json.dumps(payload), content_type='application/json')
+        second = self.client.post(url, data=json.dumps(payload), content_type='application/json')
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(first.json()['delivery_id'], second.json()['delivery_id'])
+        self.assertEqual(
+            OutboundDelivery.objects.filter(chat=self.chat, text='Exactly once').count(),
+            1,
+        )
 
     def test_reaction_api_queues_telegram_reaction(self):
         message = Message.objects.create(

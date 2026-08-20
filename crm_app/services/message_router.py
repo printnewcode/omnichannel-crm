@@ -474,16 +474,43 @@ class MessageRouter:
             TelegramAccount.AccountType.PERSONAL,
             TelegramAccount.AccountType.BOT,
         }
-        return MessageModel.objects.create(
-            telegram_id=int(telegram_message_id) if is_telegram else None,
-            external_message_id=None if is_telegram else str(telegram_message_id),
-            chat=chat,
-            text=text,
-            message_type=message_type,
-            status=MessageModel.MessageStatus.SENT,
-            is_outgoing=True,
-            telegram_date=timezone.now(),
-            reply_to_message=reply_to_message,
-            media_file_path=media_file_path,
-            metadata={}
+        lookup = {'chat': chat}
+        if is_telegram:
+            lookup['telegram_id'] = int(telegram_message_id)
+        else:
+            lookup['external_message_id'] = str(telegram_message_id)
+        message, was_created = MessageModel.objects.get_or_create(
+            **lookup,
+            defaults={
+                'text': text,
+                'message_type': message_type,
+                'status': MessageModel.MessageStatus.SENT,
+                'is_outgoing': True,
+                'telegram_date': timezone.now(),
+                'reply_to_message': reply_to_message,
+                'media_file_path': media_file_path,
+                'metadata': {},
+            },
         )
+        if not was_created:
+            update_fields = []
+            for field, value in (
+                ('status', MessageModel.MessageStatus.SENT),
+                ('is_outgoing', True),
+            ):
+                if getattr(message, field) != value:
+                    setattr(message, field, value)
+                    update_fields.append(field)
+            if text and not message.text:
+                message.text = text
+                update_fields.append('text')
+            if media_file_path and not message.media_file_path:
+                message.media_file_path = media_file_path
+                update_fields.append('media_file_path')
+            if reply_to_message and not message.reply_to_message_id:
+                message.reply_to_message = reply_to_message
+                update_fields.append('reply_to_message')
+            if update_fields:
+                message.save(update_fields=[*update_fields, 'updated_at'])
+        message._outbox_was_created = was_created
+        return message
