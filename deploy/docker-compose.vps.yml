@@ -117,7 +117,7 @@ services:
     cpus: "0.18"
     pids_limit: 100
     logging: *default-logging
-    command: python manage.py start_telegram_accounts --reconcile-interval 900 --account-refresh-interval 30
+    command: python manage.py start_telegram_accounts --reconcile-interval 900 --account-refresh-interval 60
     depends_on:
       migrate:
         condition: service_completed_successfully

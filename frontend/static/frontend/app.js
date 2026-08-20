@@ -178,6 +178,9 @@ let messageFetchLimit = 50;
 let messageFetchController = null;
 let chatFetchPromise = null;
 let chatRefreshQueued = false;
+let chatNextUrl = null;
+let chatArchiveCount = 0;
+let chatFetchGeneration = 0;
 
 const getChatName = (chat) => chat?.title || chat?.username || chat?.first_name || "Без имени";
 const getMessenger = (chat) => {
@@ -385,10 +388,8 @@ const resetConversation = () => {
 
 const setArchiveMode = (enabled) => {
   archiveMode = Boolean(enabled);
-  renderChats(allChats);
-  const first = orderChats(allChats)[0];
-  if (first) selectChat(first.id);
-  else resetConversation();
+  resetConversation();
+  window.fetchChatsGlobal?.({reset: true});
 };
 
 const changeChatArchiveState = async (chat) => {
@@ -411,23 +412,15 @@ const changeChatArchiveState = async (chat) => {
   }
 };
 
-const applyChatSearchFilter = () => {
-  const query = (document.getElementById('chat-search')?.value || '').trim().toLowerCase();
-  let displayedCount = 0;
-  document.querySelectorAll('#chat-list .chat-item').forEach((item) => {
-    item.hidden = Boolean(query) && !item.dataset.searchText.includes(query);
-    if (!item.hidden) displayedCount += 1;
-  });
+const updateDisplayedChatCount = () => {
   const counter = document.getElementById('chat-count');
-  if (counter) counter.textContent = String(displayedCount);
+  if (counter) counter.textContent = String(document.querySelectorAll('#chat-list .chat-item').length);
 };
 
 const renderChats = (chats) => {
   const chatList = document.getElementById('chat-list');
   const chatCount = document.getElementById('chat-count');
   if (!chatList) return;
-  const messengerChats = chats.filter((chat) => isChatInCurrentScope(chat));
-  const archivedCount = messengerChats.filter((chat) => chat.is_archived).length;
   const visibleChats = orderChats(chats);
   const archiveToggle = document.getElementById('archive-toggle');
   const archiveCount = document.getElementById('archive-count');
@@ -437,8 +430,8 @@ const renderChats = (chats) => {
     archiveToggle.classList.toggle('active', archiveMode);
     archiveToggle.setAttribute('aria-pressed', String(archiveMode));
   }
-  if (archiveCount) archiveCount.textContent = String(archivedCount);
-  if (archiveSubtitle) archiveSubtitle.textContent = archivedCount ? `${archivedCount} ${archivedCount === 1 ? 'диалог' : 'диалогов'}` : 'Нет архивных диалогов';
+  if (archiveCount) archiveCount.textContent = String(chatArchiveCount);
+  if (archiveSubtitle) archiveSubtitle.textContent = chatArchiveCount ? `${chatArchiveCount} ${chatArchiveCount === 1 ? 'диалог' : 'диалогов'}` : 'Нет архивных диалогов';
   if (listTitle) listTitle.textContent = archiveMode ? 'Архив' : 'Все диалоги';
   chatList.replaceChildren();
   if (chatCount) chatCount.textContent = '0';
@@ -519,7 +512,7 @@ const renderChats = (chats) => {
     li.addEventListener('contextmenu', (event) => showChatContextMenu(event, chat));
     chatList.appendChild(li);
   });
-  applyChatSearchFilter();
+  updateDisplayedChatCount();
 };
 // Helper to get status icon
 const getStatusIcon = (msg) => {
@@ -1053,33 +1046,54 @@ document.addEventListener("DOMContentLoaded", () => {
     if (orderedChats.length > 0 && !currentChatId) selectChat(orderedChats[0].id);
   };
 
-  const fetchChats = () => {
-    // Realtime events can arrive in bursts. Never cancel an almost completed
-    // multi-page load: keep one request chain and merge the burst into one
-    // follow-up refresh.
+  const getChatsUrl = () => {
+    const params = new URLSearchParams({
+      page_size: '50',
+      messenger: currentMessenger,
+      archived: archiveMode ? '1' : '0',
+    });
+    const search = (document.getElementById('chat-search')?.value || '').trim();
+    if (search) params.set('search', search);
+    return `${apiBase}/chats/?${params.toString()}`;
+  };
+
+  const fetchChats = ({reset = false, loadMore = false} = {}) => {
+    if (reset) {
+      chatFetchGeneration += 1;
+      chatNextUrl = getChatsUrl();
+      allChats = [];
+      renderChats(allChats);
+    }
     if (chatFetchPromise) {
       chatRefreshQueued = true;
       return chatFetchPromise;
     }
 
+    const generation = chatFetchGeneration;
+    const requestUrl = loadMore ? chatNextUrl : getChatsUrl();
+    if (!requestUrl) return Promise.resolve();
     chatFetchPromise = (async () => {
       try {
-        const chats = [];
-        let nextUrl = `${apiBase}/chats/?page_size=100`;
-        const visitedPages = new Set();
-        let firstPage = true;
-        while (nextUrl && !visitedPages.has(nextUrl)) {
-          visitedPages.add(nextUrl);
-          const response = await fetch(nextUrl);
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const data = await response.json();
-          chats.push(...normalizeList(data));
-          nextUrl = typeof data?.next === 'string' ? data.next : null;
-
-          // On first entry show useful content immediately. During later
-          // refreshes keep the existing list stable until all pages arrive.
-          if ((allChats.length === 0 && firstPage) || !nextUrl) applyFetchedChats(chats);
-          firstPage = false;
+        const response = await fetch(requestUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (generation !== chatFetchGeneration) return;
+        const received = normalizeList(data);
+        chatArchiveCount = Number(data?.archive_count || 0);
+        if (loadMore) {
+          const merged = new Map(allChats.map((chat) => [Number(chat.id), chat]));
+          received.forEach((chat) => merged.set(Number(chat.id), chat));
+          chatNextUrl = typeof data?.next === 'string' ? data.next : null;
+          applyFetchedChats([...merged.values()]);
+        } else if (allChats.length === 0 || reset) {
+          chatNextUrl = typeof data?.next === 'string' ? data.next : null;
+          applyFetchedChats(received);
+        } else {
+          // A realtime refresh updates the newest rows but retains pages that
+          // the operator already loaded, avoiding sidebar jumps.
+          const merged = new Map(allChats.map((chat) => [Number(chat.id), chat]));
+          received.forEach((chat) => merged.set(Number(chat.id), chat));
+          applyFetchedChats([...merged.values()]);
         }
       } catch (error) {
         console.error("Critical error in fetchChats:", error);
@@ -1091,11 +1105,12 @@ document.addEventListener("DOMContentLoaded", () => {
       chatFetchPromise = null;
       if (chatRefreshQueued) {
         chatRefreshQueued = false;
-        setTimeout(fetchChats, 250);
+        setTimeout(() => fetchChats(), 250);
       }
     });
     return chatFetchPromise;
   };
+  window.fetchChatsGlobal = fetchChats;
 
   window.activateAccount = async (id, name) => {
     try {
@@ -1194,10 +1209,7 @@ document.addEventListener("DOMContentLoaded", () => {
         option.setAttribute("aria-pressed", String(active));
       });
       resetConversation();
-      renderAccountHealth(allChats);
-      renderChats(allChats);
-      const first = orderChats(allChats)[0];
-      if (first) selectChat(first.id);
+      fetchChats({reset: true});
     });
   });
   // Attachments and emoji
@@ -1277,9 +1289,20 @@ document.addEventListener("DOMContentLoaded", () => {
       setError(localizeError(error.message));
     }
   });
-  // Search filter (client side simple)
+  let chatSearchTimer = null;
   document.getElementById("chat-search")?.addEventListener("input", () => {
-    applyChatSearchFilter();
+    clearTimeout(chatSearchTimer);
+    chatSearchTimer = setTimeout(() => {
+      resetConversation();
+      fetchChats({reset: true});
+    }, 300);
+  });
+
+  document.getElementById('chat-list')?.addEventListener('scroll', (event) => {
+    const list = event.currentTarget;
+    if (chatNextUrl && list.scrollTop + list.clientHeight >= list.scrollHeight - 240) {
+      fetchChats({loadMore: true});
+    }
   });
 
   // Message search filter
@@ -1398,7 +1421,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  fetchChats();
+  fetchChats({reset: true});
   connectRealtime();
   startFallbackPolling();
 });

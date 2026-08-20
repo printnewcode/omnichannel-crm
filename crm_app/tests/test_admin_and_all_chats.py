@@ -105,6 +105,25 @@ class AllMessengerConversationTests(TestCase):
         self.assertEqual(len(second['results']), 100)
         self.assertEqual(len(third['results']), 5)
 
+    def test_chat_api_filters_messenger_archive_and_search_on_server(self):
+        self.chats[0].is_archived = True
+        self.chats[0].save(update_fields=['is_archived'])
+
+        max_archive = self.client.get(reverse('chat-list'), {
+            'messenger': 'max',
+            'archived': '1',
+            'search': 'max',
+        }).json()
+        whatsapp_active = self.client.get(reverse('chat-list'), {
+            'messenger': 'whatsapp',
+            'archived': '0',
+        }).json()
+
+        self.assertEqual([item['id'] for item in max_archive['results']], [self.chats[0].id])
+        self.assertEqual(max_archive['active_count'], 0)
+        self.assertEqual(max_archive['archive_count'], 1)
+        self.assertEqual([item['id'] for item in whatsapp_active['results']], [self.chats[1].id])
+
     def test_chat_list_uses_compact_account_payload(self):
         result = self.client.get(reverse('chat-list')).json()['results'][0]
 
@@ -147,4 +166,6 @@ class AllMessengerConversationTests(TestCase):
         self.assertContains(response, 'data-messenger="all"')
         self.assertIn('messenger-badge--${messenger}', script)
         self.assertIn('messenger === "all" || getMessenger(chat) === messenger', script)
-        self.assertIn('if (!item.hidden) displayedCount += 1', script)
+        self.assertIn("page_size: '50'", script)
+        self.assertIn('fetchChats({loadMore: true})', script)
+        self.assertNotIn('while (nextUrl', script)

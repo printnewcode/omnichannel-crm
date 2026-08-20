@@ -272,7 +272,7 @@ LOGGING = {
         },
         'crm_app': {
             'handlers': ['console', 'file'],
-            'level': 'DEBUG',
+            'level': config('CRM_LOG_LEVEL', default='INFO'),
             'propagate': False,
         },
         'telethon': {

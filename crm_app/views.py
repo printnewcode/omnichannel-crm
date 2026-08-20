@@ -14,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from django.db import transaction
-from django.db.models import OuterRef, Q, Subquery
+from django.db.models import Count, OuterRef, Q, Subquery
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.conf import settings
@@ -52,9 +52,9 @@ class MessagePagination(PageNumberPagination):
 class ChatPagination(PageNumberPagination):
     """Serve the conversation list in moderate chunks for the small VPS."""
 
-    page_size = 100
+    page_size = 50
     page_size_query_param = 'page_size'
-    max_page_size = 200
+    max_page_size = 100
 
 
 def _enqueue_message_batch(*, chat, text, media_paths, requested_by, reply_to_message=None):
@@ -473,6 +473,44 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
         run_history_import.delay(job.id)
         return Response(HistoryImportJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
 
+    def _visible_chats(self):
+        """Apply cheap list filters before previews and pagination are built."""
+        queryset = Chat.objects.select_related('telegram_account').filter(
+            chat_type=Chat.ChatType.PRIVATE,
+            is_bot=False,
+        )
+        messenger = self.request.query_params.get('messenger', 'all').strip().lower()
+        account_types = {
+            'telegram': [
+                TelegramAccount.AccountType.PERSONAL,
+                TelegramAccount.AccountType.BOT,
+            ],
+            'max': [TelegramAccount.AccountType.MAX],
+            'whatsapp': [TelegramAccount.AccountType.WHATSAPP],
+        }.get(messenger)
+        if account_types is not None:
+            queryset = queryset.filter(telegram_account__account_type__in=account_types)
+
+        search_query = (self.request.query_params.get('search') or '').strip()
+        if search_query:
+            queryset = queryset.filter(
+                Q(title__icontains=search_query)
+                | Q(username__icontains=search_query)
+                | Q(first_name__icontains=search_query)
+                | Q(last_name__icontains=search_query)
+                | Q(telegram_account__name__icontains=search_query)
+            )
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        totals = self._visible_chats().aggregate(
+            active_count=Count('id', filter=Q(is_archived=False)),
+            archive_count=Count('id', filter=Q(is_archived=True)),
+        )
+        response.data.update(totals)
+        return response
+
     def get_queryset(self):
         # Group messages remain persisted, but are intentionally hidden from the
         # operator workspace until group-chat UX is ready.
@@ -482,10 +520,7 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
         latest_message = Message.objects.filter(chat_id=OuterRef('pk')).order_by('-telegram_date').annotate(
             preview=Coalesce('text', 'media_caption'),
         )
-        queryset = Chat.objects.select_related('telegram_account').filter(
-            chat_type=Chat.ChatType.PRIVATE,
-            is_bot=False,
-        ).annotate(
+        queryset = self._visible_chats().annotate(
             latest_stored_message_preview=Subquery(latest_message.values('preview')[:1]),
         )
         archived = self.request.query_params.get('archived')
