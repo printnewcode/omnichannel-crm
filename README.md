@@ -80,7 +80,7 @@ Apache-2.0. См. [LICENSE](LICENSE).
 
 ## Интеграция WhatsApp
 
-WhatsApp подключается через GREEN-API. CRM принимает уведомления Webhook Endpoint, проверяет заголовок `Authorization`, сохраняет входящие сообщения и фоновой задачей скачивает вложения. Текст отправляется методом `sendMessage`, файлы — `sendFileByUpload`; поддерживаются цитирование и статусы `sent`, `delivered`, `read`, `failed` и `noAccount`.
+WhatsApp подключается через GREEN-API. CRM принимает уведомления Webhook Endpoint, проверяет заголовок `Authorization`, сохраняет входящие сообщения, а также исходящие сообщения с телефона, WhatsApp Web/Desktop и через API; вложения скачиваются фоновой задачей. Текст отправляется методом `sendMessage`, файлы — `sendFileByUpload`; поддерживаются цитирование и статусы `sent`, `delivered`, `read`, `failed` и `noAccount`.
 
 Для работы нужен созданный и авторизованный инстанс GREEN-API. Его `idInstance`, `apiTokenInstance` и отдельный токен webhook сохраняются в аккаунте CRM. Настройка приведена в [SETUP.md](SETUP.md).
 
@@ -88,6 +88,6 @@ WhatsApp подключается через GREEN-API. CRM принимает �
 
 ## Интеграция MAX
 
-MAX подключается как личный аккаунт через отдельный MAX-инстанс GREEN-API. CRM принимает входящие уведомления через защищённый `Authorization` webhook, сохраняет текст и медиа, отправляет ответы методами `sendMessage` и `sendFileByUpload`, а также обрабатывает статусы доставки. Числовой `chatId` MAX передаётся без WhatsApp-суффикса `@c.us`.
+MAX подключается как личный аккаунт через отдельный MAX-инстанс GREEN-API. CRM принимает через защищённый `Authorization` webhook входящие и исходящие сообщения с телефона/Web/Desktop/API, сохраняет текст и медиа, отправляет ответы методами `sendMessage` и `sendFileByUpload`, а также обрабатывает статусы доставки. Числовой `chatId` MAX передаётся без WhatsApp-суффикса `@c.us`.
 
 Для работы нужны `idInstance`, `apiTokenInstance`, отдельный токен webhook и публичный HTTPS URL CRM. Практическая настройка приведена в [SETUP.md](SETUP.md).

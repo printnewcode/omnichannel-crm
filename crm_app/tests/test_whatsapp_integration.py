@@ -1,4 +1,5 @@
 import json
+import base64
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -81,6 +82,8 @@ class GreenAPIClientTests(TestCase):
         self.assertEqual(payload['webhookUrlToken'], 'Bearer hook-token')
         self.assertEqual(payload['incomingWebhook'], 'yes')
         self.assertEqual(payload['outgoingWebhook'], 'yes')
+        self.assertEqual(payload['outgoingMessageWebhook'], 'yes')
+        self.assertEqual(payload['outgoingAPIMessageWebhook'], 'yes')
 
     def test_readable_api_error(self):
         session = Mock()
@@ -227,7 +230,8 @@ class GreenAPIMediaDownloadTests(TestCase):
         'crm_app.services.whatsapp_client.GreenAPIClient.get_download_url',
         return_value='https://sw-media.storage.greenapi.net/1/legacy-root.jpg',
     )
-    def test_legacy_string_metadata_is_normalized(self, refresh_url):
+    @patch('crm_app.services.whatsapp_client.GreenAPIClient.get_message', return_value={})
+    def test_legacy_string_metadata_is_normalized(self, get_message, refresh_url):
         account = TelegramAccount.objects.create(
             name='WhatsApp legacy root', account_type='whatsapp', status='active',
             green_api_instance_id='1', green_api_token='token',
@@ -322,7 +326,8 @@ class GreenAPIMediaDownloadTests(TestCase):
         'crm_app.services.whatsapp_client.GreenAPIClient.get_download_url',
         return_value='https://sw-media.storage.greenapi.net/1101000000/refreshed.jpg',
     )
-    def test_missing_whatsapp_history_url_is_refreshed_via_download_file(self, refresh_url):
+    @patch('crm_app.services.whatsapp_client.GreenAPIClient.get_message', return_value={})
+    def test_missing_whatsapp_history_url_is_refreshed_via_download_file(self, get_message, refresh_url):
         account = TelegramAccount.objects.create(
             name='WhatsApp history', account_type='whatsapp', status='active',
             green_api_instance_id='1101000000', green_api_token='token',
@@ -347,7 +352,8 @@ class GreenAPIMediaDownloadTests(TestCase):
         self.assertEqual(message.metadata['download_url'], refresh_url.return_value)
 
     @patch('crm_app.services.whatsapp_client.GreenAPIClient.get_download_url', return_value=None)
-    def test_green_api_media_rejects_unrelated_object_storage_host(self, refresh_url):
+    @patch('crm_app.services.whatsapp_client.GreenAPIClient.get_message', return_value={})
+    def test_green_api_media_rejects_unrelated_object_storage_host(self, get_message, refresh_url):
         account = TelegramAccount.objects.create(
             name='Unsafe media', account_type='whatsapp', status='active',
             green_api_instance_id='7107000000', green_api_token='token',
@@ -362,6 +368,74 @@ class GreenAPIMediaDownloadTests(TestCase):
         with self.assertRaisesRegex(ValueError, 'Unsafe GREEN-API media URL'):
             download_green_api_media(message)
         refresh_url.assert_called_once()
+
+    @patch(
+        'crm_app.services.whatsapp_client.GreenAPIClient.get_download_url',
+        side_effect=GreenAPIError('File message encrypted url not found'),
+    )
+    @patch(
+        'crm_app.services.whatsapp_client.GreenAPIClient.get_message',
+        return_value={
+            'idMessage': 'old-photo',
+            'typeMessage': 'imageMessage',
+            'downloadUrl': 'https://sw-media.storage.greenapi.net/1/recovered.jpg',
+            'fileName': 'recovered.jpg',
+            'mimeType': 'image/jpeg',
+        },
+    )
+    def test_old_whatsapp_media_uses_get_message_before_download_file(self, get_message, download_file):
+        account = TelegramAccount.objects.create(
+            name='WhatsApp old media', account_type='whatsapp', status='active',
+            green_api_instance_id='1', green_api_token='token',
+        )
+        chat = Chat.objects.create(
+            telegram_id=79104945280, telegram_account=account,
+            metadata={'external_chat_id': '79104945280@c.us'},
+        )
+        message = Message.objects.create(
+            chat=chat, external_message_id='old-photo', message_type='photo',
+            telegram_date='2025-01-01T00:00:00Z', metadata={},
+        )
+        response = Response({}, headers={'Content-Type': 'image/jpeg'}, chunks=[b'recovered'])
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=Path(media_root)), patch(
+            'crm_app.services.provider_media.requests.get', return_value=response
+        ):
+            relative = download_green_api_media(message)
+            self.assertEqual((Path(media_root) / relative).read_bytes(), b'recovered')
+        get_message.assert_called_once_with('79104945280@c.us', 'old-photo')
+        download_file.assert_not_called()
+
+    @patch(
+        'crm_app.services.whatsapp_client.GreenAPIClient.get_download_url',
+        side_effect=GreenAPIError('File message encrypted url not found'),
+    )
+    @patch(
+        'crm_app.services.whatsapp_client.GreenAPIClient.get_message',
+        return_value={
+            'idMessage': 'expired-photo',
+            'typeMessage': 'imageMessage',
+            'jpegThumbnail': base64.b64encode(b'jpeg-preview').decode(),
+            'mimeType': 'image/jpeg',
+        },
+    )
+    def test_expired_whatsapp_photo_falls_back_to_jpeg_preview(self, get_message, download_file):
+        account = TelegramAccount.objects.create(
+            name='WhatsApp preview', account_type='whatsapp', status='active',
+            green_api_instance_id='1', green_api_token='token',
+        )
+        chat = Chat.objects.create(
+            telegram_id=79104945281, telegram_account=account,
+            metadata={'external_chat_id': '79104945281@c.us'},
+        )
+        message = Message.objects.create(
+            chat=chat, external_message_id='expired-photo', message_type='photo',
+            telegram_date='2025-01-01T00:00:00Z', metadata={},
+        )
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=Path(media_root)):
+            relative = download_green_api_media(message)
+            self.assertEqual((Path(media_root) / relative).read_bytes(), b'jpeg-preview')
+        message.refresh_from_db()
+        self.assertTrue(message.metadata['media_is_preview'])
 
 
 class GreenAPIOutboundAndFrontendTests(TestCase):

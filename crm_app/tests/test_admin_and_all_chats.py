@@ -124,6 +124,36 @@ class AllMessengerConversationTests(TestCase):
         self.assertEqual(max_archive['archive_count'], 1)
         self.assertEqual([item['id'] for item in whatsapp_active['results']], [self.chats[1].id])
 
+    def test_search_finds_chat_outside_initial_page(self):
+        account = self.accounts[TelegramAccount.AccountType.PERSONAL]
+        now = timezone.now()
+        Chat.objects.bulk_create([
+            Chat(
+                telegram_id=94000 + index,
+                telegram_account=account,
+                chat_type=Chat.ChatType.PRIVATE,
+                title=f'Обычный диалог {index}',
+                last_message_at=now - timedelta(minutes=index),
+            )
+            for index in range(60)
+        ])
+        old_chat = Chat.objects.create(
+            telegram_id=94999,
+            telegram_account=account,
+            chat_type=Chat.ChatType.PRIVATE,
+            title='Уникальный старый клиент',
+            last_message_at=now - timedelta(days=500),
+        )
+
+        first_page = self.client.get(reverse('chat-list'), {'page_size': 50}).json()
+        search = self.client.get(reverse('chat-list'), {
+            'page_size': 50,
+            'search': 'Уникальный старый',
+        }).json()
+
+        self.assertNotIn(old_chat.id, [item['id'] for item in first_page['results']])
+        self.assertEqual([item['id'] for item in search['results']], [old_chat.id])
+
     def test_chat_list_uses_compact_account_payload(self):
         result = self.client.get(reverse('chat-list')).json()['results'][0]
 

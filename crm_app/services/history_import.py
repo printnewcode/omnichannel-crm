@@ -27,10 +27,23 @@ MEDIA_TYPES = {
 
 
 def _green_content(item):
-    raw_type = item.get('typeMessage') or 'textMessage'
-    text = item.get('textMessage') or (item.get('extendedTextMessage') or {}).get('text') or ''
-    content = item.get('fileMessageData') or item.get('stickerMessageData') or item
-    download_url = item.get('downloadUrl') or content.get('downloadUrl')
+    message_data = item.get('messageData') if isinstance(item.get('messageData'), dict) else item
+    raw_type = message_data.get('typeMessage') or item.get('typeMessage') or 'textMessage'
+    text = (
+        message_data.get('textMessage')
+        or (message_data.get('textMessageData') or {}).get('textMessage')
+        or (message_data.get('extendedTextMessage') or {}).get('text')
+        or ''
+    )
+    content = message_data.get('fileMessageData') or message_data.get('stickerMessageData') or message_data
+    if not isinstance(content, dict):
+        content = {}
+    download_url = (
+        message_data.get('downloadUrl')
+        or message_data.get('downloadUrlJpeg')
+        or content.get('downloadUrl')
+        or content.get('downloadUrlJpeg')
+    )
     return raw_type, text or content.get('caption') or '', content, download_url
 
 

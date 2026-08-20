@@ -89,6 +89,164 @@ class ProviderWebhookTests(TestCase):
         )
         self.assertEqual(forbidden.status_code, 403)
 
+    def test_whatsapp_message_sent_from_phone_or_desktop_is_ingested_as_outgoing(self):
+        account = TelegramAccount.objects.create(
+            name='WhatsApp', account_type=TelegramAccount.AccountType.WHATSAPP,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            green_api_instance_id='10011', green_api_token='token', green_webhook_token='hook',
+        )
+        payload = {
+            'typeWebhook': 'outgoingMessageReceived',
+            'instanceData': {'idInstance': 10011},
+            'timestamp': 1700000000,
+            'idMessage': 'wa-phone-out',
+            'senderData': {
+                'chatId': '79990001133@c.us', 'sender': '79990000000@c.us',
+                'chatName': 'Recipient', 'senderName': 'Connected account',
+            },
+            'messageData': {
+                'typeMessage': 'textMessage',
+                'textMessageData': {'textMessage': 'Sent from WhatsApp Desktop'},
+            },
+        }
+
+        response = self.client.post(
+            reverse('whatsapp-webhook', kwargs={'account_id': account.id}),
+            data=json.dumps(payload), content_type='application/json',
+            headers={'Authorization': 'Bearer hook'},
+        )
+
+        self.assertEqual(response.json()['processed'], 1)
+        message = Message.objects.get(external_message_id='wa-phone-out')
+        self.assertTrue(message.is_outgoing)
+        self.assertEqual(message.status, Message.MessageStatus.SENT)
+        self.assertEqual(message.text, 'Sent from WhatsApp Desktop')
+        self.assertEqual(message.chat.title, 'Recipient')
+        self.assertEqual(message.chat.unread_count, 0)
+
+    def test_max_message_sent_from_phone_or_desktop_is_ingested_as_outgoing(self):
+        account = TelegramAccount.objects.create(
+            name='MAX', account_type=TelegramAccount.AccountType.MAX,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            green_api_instance_id='20011', green_api_token='token', green_webhook_token='hook',
+        )
+        payload = {
+            'typeWebhook': 'outgoingMessageReceived',
+            'instanceData': {'idInstance': 20011, 'typeInstance': 'v3'},
+            'timestamp': 1700000000,
+            'idMessage': 'max-phone-out',
+            'senderData': {
+                'chatId': '10000011', 'chatType': 'user', 'sender': '10000011',
+                'chatName': 'MAX Recipient', 'senderName': 'Connected MAX account',
+            },
+            'messageData': {
+                'typeMessage': 'textMessage',
+                'textMessageData': {'textMessage': 'Sent from MAX'},
+            },
+        }
+
+        response = self.client.post(
+            reverse('max-webhook', kwargs={'account_id': account.id}),
+            data=json.dumps(payload), content_type='application/json',
+            headers={'Authorization': 'Bearer hook'},
+        )
+
+        self.assertEqual(response.json()['processed'], 1)
+        message = Message.objects.get(external_message_id='max-phone-out')
+        self.assertTrue(message.is_outgoing)
+        self.assertEqual(message.status, Message.MessageStatus.SENT)
+        self.assertEqual(message.chat.title, 'MAX Recipient')
+        self.assertEqual(message.chat.unread_count, 0)
+
+    @patch('crm_app.tasks.download_green_api_media_task.delay')
+    def test_outgoing_whatsapp_media_keeps_quote_and_starts_download(self, download_media):
+        account = TelegramAccount.objects.create(
+            name='WhatsApp media', account_type=TelegramAccount.AccountType.WHATSAPP,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            green_api_instance_id='10013', green_api_token='token', green_webhook_token='hook',
+        )
+        chat = Chat.objects.create(
+            telegram_id=79990001155, telegram_account=account,
+            chat_type=Chat.ChatType.PRIVATE,
+            title='Recipient', metadata={'external_chat_id': '79990001155@c.us'},
+        )
+        target = Message.objects.create(
+            chat=chat, external_message_id='quoted-in', text='Earlier',
+            telegram_date=timezone.now(),
+        )
+        payload = {
+            'typeWebhook': 'outgoingMessageReceived',
+            'instanceData': {'idInstance': 10013},
+            'timestamp': 1700000000,
+            'idMessage': 'wa-photo-out',
+            'senderData': {
+                'chatId': '79990001155@c.us', 'sender': '79990000000@c.us',
+                'chatName': 'Recipient',
+            },
+            'messageData': {
+                'typeMessage': 'imageMessage',
+                'fileMessageData': {
+                    'downloadUrl': 'https://sw-media.storage.greenapi.net/10013/photo.jpg',
+                    'caption': 'Photo from phone', 'mimeType': 'image/jpeg',
+                },
+                'quotedMessage': {'stanzaId': 'quoted-in'},
+            },
+        }
+
+        response = self.client.post(
+            reverse('whatsapp-webhook', kwargs={'account_id': account.id}),
+            data=json.dumps(payload), content_type='application/json',
+            headers={'Authorization': 'Bearer hook'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        message = Message.objects.get(external_message_id='wa-photo-out')
+        self.assertTrue(message.is_outgoing)
+        self.assertEqual(message.message_type, Message.MessageType.PHOTO)
+        self.assertEqual(message.reply_to_message, target)
+        download_media.assert_called_once_with(message.id)
+
+    def test_outgoing_api_webhook_does_not_duplicate_message_created_by_crm(self):
+        account = TelegramAccount.objects.create(
+            name='WhatsApp API', account_type=TelegramAccount.AccountType.WHATSAPP,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+            green_api_instance_id='10012', green_api_token='token', green_webhook_token='hook',
+        )
+        chat = Chat.objects.create(
+            telegram_id=79990001144, telegram_account=account,
+            chat_type=Chat.ChatType.PRIVATE,
+            title='Recipient', metadata={'external_chat_id': '79990001144@c.us'},
+        )
+        existing = Message.objects.create(
+            chat=chat, external_message_id='wa-api-out', text='Sent from CRM',
+            is_outgoing=True, status=Message.MessageStatus.SENT,
+            telegram_date=timezone.now(),
+        )
+        payload = {
+            'typeWebhook': 'outgoingAPIMessageReceived',
+            'instanceData': {'idInstance': 10012},
+            'timestamp': 1700000000,
+            'idMessage': 'wa-api-out',
+            'senderData': {
+                'chatId': '79990001144@c.us', 'sender': '79990000000@c.us',
+                'chatName': 'Recipient',
+            },
+            'messageData': {
+                'typeMessage': 'textMessage',
+                'textMessageData': {'textMessage': 'Sent from CRM'},
+            },
+        }
+
+        response = self.client.post(
+            reverse('whatsapp-webhook', kwargs={'account_id': account.id}),
+            data=json.dumps(payload), content_type='application/json',
+            headers={'Authorization': 'Bearer hook'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Message.objects.filter(external_message_id='wa-api-out').count(), 1)
+        self.assertEqual(Message.objects.get(external_message_id='wa-api-out').id, existing.id)
+
     def test_provider_bot_peer_is_saved_but_marked_hidden(self):
         account = TelegramAccount.objects.create(
             name='MAX personal', account_type=TelegramAccount.AccountType.MAX,

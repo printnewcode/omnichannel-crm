@@ -95,6 +95,17 @@ class MaxGreenAPIClientTests(SimpleTestCase):
 
         self.assertEqual(result, 'https://storage.greenapi.net/file.jpg')
 
+    def test_get_message_requests_exact_chat_message(self):
+        session = Mock()
+        response = Mock(ok=True)
+        response.json.return_value = {'idMessage': 'message-3', 'downloadUrl': 'https://storage.greenapi.net/file.jpg'}
+        session.request.return_value = response
+
+        result = GreenAPIClient(self.account(), session=session).get_message('10000000', 'message-3')
+
+        self.assertEqual(result['idMessage'], 'message-3')
+        self.assertIn('/getMessage/', session.request.call_args.args[1])
+
     def test_string_error_response_is_reported_without_attribute_error(self):
         session = Mock()
         response = Mock(ok=False, status_code=400, text='bad request')

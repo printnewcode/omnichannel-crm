@@ -1,5 +1,7 @@
 """Safe media download helpers for webhook-based providers."""
 
+import base64
+import binascii
 import mimetypes
 import re
 from pathlib import Path
@@ -10,6 +12,7 @@ from django.conf import settings
 from django.utils.text import get_valid_filename
 
 MAX_GREEN_API_DOWNLOAD_BYTES = 100 * 1024 * 1024
+MAX_GREEN_API_THUMBNAIL_BYTES = 5 * 1024 * 1024
 
 
 def _allowed_green_api_host(hostname, account):
@@ -41,6 +44,60 @@ def _allowed_green_api_host(hostname, account):
     return False
 
 
+def _green_media_info(payload):
+    """Normalize webhook, journal and getMessage media shapes."""
+    if not isinstance(payload, dict):
+        return {}, []
+    message_data = payload.get('messageData') if isinstance(payload.get('messageData'), dict) else payload
+    content = message_data.get('fileMessageData') or message_data.get('stickerMessageData') or message_data
+    if not isinstance(content, dict):
+        content = {}
+    urls = []
+    for source in (content, message_data, payload):
+        if not isinstance(source, dict):
+            continue
+        for key in ('downloadUrl', 'downloadUrlJpeg', 'urlFile'):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip() and value.strip() not in urls:
+                urls.append(value.strip())
+    return content, urls
+
+
+def _store_green_thumbnail(message, metadata, content):
+    """Use the provider preview only when the original image has expired."""
+    if message.message_type not in {message.MessageType.PHOTO, message.MessageType.STICKER}:
+        return None
+    thumbnail = content.get('jpegThumbnail') if isinstance(content, dict) else None
+    if not isinstance(thumbnail, str) or not thumbnail.strip():
+        return None
+    encoded = thumbnail.split(',', 1)[-1].strip()
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not raw or len(raw) > MAX_GREEN_API_THUMBNAIL_BYTES:
+        return None
+
+    relative = Path(message.chat.telegram_account.account_type) / 'preview' / str(message.id) / f'preview_{message.id}.jpg'
+    root = Path(settings.MEDIA_ROOT).resolve()
+    destination = (root / relative).resolve()
+    if root not in destination.parents:
+        raise ValueError('Unsafe GREEN-API media destination')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(raw)
+    message.media_file_path = relative.as_posix()
+    message.metadata = {
+        **metadata,
+        'provider_content': content,
+        'media_content_type': 'image/jpeg',
+        'media_size': len(raw),
+        'original_filename': f'preview_{message.id}.jpg',
+        'media_is_preview': True,
+    }
+    message.save(update_fields=['media_file_path', 'metadata', 'updated_at'])
+    return message.media_file_path
+
+
 def download_green_api_media(message):
     account = message.chat.telegram_account
     metadata = message.metadata if isinstance(message.metadata, dict) else {}
@@ -60,37 +117,87 @@ def download_green_api_media(message):
             and _allowed_green_api_host(candidate.hostname, account)
         )
 
-    # Journal entries and older webhooks can contain an empty, expired or
-    # cluster-specific URL. Ask GREEN-API for a fresh official link before
-    # rejecting the attachment. This works for both WhatsApp and MAX.
-    if not is_safe(parsed):
-        from .whatsapp_client import GreenAPIClient
+    from .whatsapp_client import GreenAPIClient, GreenAPIError
 
-        external_chat_id = metadata.get('external_chat_id') or chat_metadata.get('external_chat_id') or message.chat.telegram_id
-        external_message_id = message.external_message_id or message.media_file_id or message.telegram_id
-        refreshed_url = None
-        if external_chat_id and external_message_id:
-            refreshed_url = GreenAPIClient(account).get_download_url(external_chat_id, external_message_id)
-        if refreshed_url:
-            url = refreshed_url
-            parsed = urlparse(url)
-            metadata = {**metadata, 'download_url': url}
-            message.metadata = metadata
-            message.save(update_fields=['metadata', 'updated_at'])
+    external_chat_id = metadata.get('external_chat_id') or chat_metadata.get('external_chat_id') or message.chat.telegram_id
+    external_message_id = message.external_message_id or message.media_file_id or message.telegram_id
+    candidates = [url] if isinstance(url, str) and url.strip() else []
+    content = metadata.get('provider_content') if isinstance(metadata.get('provider_content'), dict) else {}
+    provider_errors = []
+    response = None
+    safe_candidates = []
 
-    if not is_safe(parsed):
-        host_label = parsed.hostname or 'missing host'
-        raise ValueError(f'Unsafe GREEN-API media URL (host: {host_label})')
+    def try_candidate(candidate):
+        nonlocal response, url
+        candidate_parsed = urlparse(candidate or '')
+        if not is_safe(candidate_parsed):
+            return
+        safe_candidates.append(candidate)
+        try:
+            attempted = requests.get(candidate, timeout=60, stream=True)
+            attempted.raise_for_status()
+            response = attempted
+            url = candidate
+        except requests.RequestException as exc:
+            provider_errors.append(str(exc))
 
-    response = requests.get(url, timeout=60, stream=True)
-    response.raise_for_status()
+    # Webhooks often already contain a working direct storage link. Avoid an
+    # extra provider request for fresh messages and only recover when it fails.
+    for candidate in list(candidates):
+        try_candidate(candidate)
+        if response is not None:
+            break
+
+    # getMessage is the most precise recovery method for old journal entries:
+    # it can return a refreshed URL or at least a JPEG preview.
+    if response is None and external_chat_id and external_message_id:
+        client = GreenAPIClient(account)
+        try:
+            provider_message = client.get_message(external_chat_id, external_message_id)
+            fresh_content, fresh_urls = _green_media_info(provider_message)
+            if fresh_content:
+                content = fresh_content
+            for candidate in fresh_urls:
+                if candidate not in candidates:
+                    candidates.append(candidate)
+        except GreenAPIError as exc:
+            provider_errors.append(str(exc))
+
+        for candidate in candidates:
+            if candidate in safe_candidates:
+                continue
+            try_candidate(candidate)
+            if response is not None:
+                break
+
+        # downloadFile is the last resort. GREEN-API documents that it returns
+        # HTTP 400 when WhatsApp no longer exposes the encrypted media URL.
+        if response is None:
+            try:
+                refreshed_url = client.get_download_url(external_chat_id, external_message_id)
+                if refreshed_url and refreshed_url not in candidates:
+                    candidates.append(refreshed_url)
+                    try_candidate(refreshed_url)
+            except GreenAPIError as exc:
+                provider_errors.append(str(exc))
+
+    if response is None:
+        preview_path = _store_green_thumbnail(message, metadata, content)
+        if preview_path:
+            return preview_path
+        if candidates and not safe_candidates:
+            host_label = urlparse(candidates[0] or '').hostname or 'missing host'
+            raise ValueError(f'Unsafe GREEN-API media URL (host: {host_label})')
+        raise ValueError(
+            'Оригинал файла больше недоступен в WhatsApp/GREEN-API. '
+            'Провайдер ограничивает срок хранения старых вложений.'
+        )
+
+    metadata = {**metadata, 'download_url': url, 'provider_content': content}
     declared_size = int(response.headers.get('Content-Length') or 0)
     if declared_size > MAX_GREEN_API_DOWNLOAD_BYTES:
         raise ValueError('GREEN-API media exceeds the 100 MB download limit')
 
-    content = metadata.get('provider_content') or {}
-    if not isinstance(content, dict):
-        content = {}
     content_type = response.headers.get('Content-Type') or content.get('mimeType') or 'application/octet-stream'
     content_type = content_type.split(';')[0]
     supplied_name = Path(content.get('fileName') or '').name

@@ -186,7 +186,13 @@ class WhatsAppWebhookView(APIView):
                 publish_message(target.id)
             return Response({'status': 'accepted', 'processed': int(bool(target))})
 
-        if webhook_type == 'incomingMessageReceived':
+        message_webhook_types = {
+            'incomingMessageReceived',
+            'outgoingMessageReceived',
+            'outgoingAPIMessageReceived',
+        }
+        if webhook_type in message_webhook_types:
+            is_outgoing = webhook_type != 'incomingMessageReceived'
             sender = payload.get('senderData') or {}
             sender = sender if isinstance(sender, dict) else {}
             chat_id = sender.get('chatId') or sender.get('sender')
@@ -228,7 +234,13 @@ class WhatsAppWebhookView(APIView):
                 external_message_id=message_id,
                 text=text,
                 sender_id=sender.get('sender'),
-                sender_name=sender.get('senderName') or sender.get('senderContactName') or sender.get('chatName'),
+                # For outgoing webhooks senderName is the connected account;
+                # chatName is the peer visible in the conversation list.
+                sender_name=(
+                    sender.get('chatName') or sender.get('senderContactName')
+                    if is_outgoing else
+                    sender.get('senderName') or sender.get('senderContactName') or sender.get('chatName')
+                ),
                 occurred_at=event_time,
                 message_type={
                     'imageMessage': 'photo', 'videoMessage': 'video', 'audioMessage': 'voice',
@@ -242,9 +254,12 @@ class WhatsAppWebhookView(APIView):
                 metadata={
                     'raw_type': raw_type, 'provider_content': content,
                     'download_url': download_url, 'external_chat_id': chat_id,
+                    'green_webhook_type': webhook_type,
                 },
                 chat_type=chat_type,
                 is_bot=peer_is_bot,
+                is_outgoing=is_outgoing,
+                status=Message.MessageStatus.SENT if is_outgoing else Message.MessageStatus.RECEIVED,
             )
             if created and download_url:
                 download_green_api_media_task.delay(message.id)
