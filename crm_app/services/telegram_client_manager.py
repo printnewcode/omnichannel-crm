@@ -36,6 +36,7 @@ from telethon.errors import (
     ApiIdInvalidError,
 )
 from ..models import TelegramAccount
+from .message_content import telegram_special_content
 
 logger = logging.getLogger(__name__)
 
@@ -600,6 +601,7 @@ class TelegramClientManager:
                                 'media_caption': getattr(message, 'message', None) if message_type != 'text' else None,
                                 'metadata': {
                                     'reactions': telegram_reaction_summary(getattr(message, 'reactions', None)),
+                                    'special_content': telegram_special_content(message),
                                 }
                             }
                         )
@@ -693,6 +695,13 @@ class TelegramClientManager:
             return 'location'
         if getattr(message, 'contact', None):
             return 'contact'
+        if getattr(message, 'poll', None):
+            return 'poll'
+        if getattr(message, 'action', None):
+            return 'service'
+        media = getattr(message, 'media', None)
+        if media and media.__class__.__name__ == 'MessageMediaDice':
+            return 'other'
             
         return 'text'
     
@@ -1970,7 +1979,7 @@ class TelegramClientManager:
                     
                     new_messages_count = 0
                     for msg in history:
-                        if not msg.message and not msg.media:
+                        if not msg.message and not msg.media and not getattr(msg, 'action', None):
                             continue
 
                         @database_sync_to_async
@@ -2012,6 +2021,7 @@ class TelegramClientManager:
                                         'reactions': telegram_reaction_summary(
                                             getattr(message_data, 'reactions', None)
                                         ),
+                                        'special_content': telegram_special_content(message_data),
                                     },
                                 )
                                 logger.info(f"Saved NEW message {message_data.id} in chat {chat_id} during sync")

@@ -135,6 +135,53 @@ const escapeHtml = (value) => {
   return element.innerHTML;
 };
 
+const renderSpecialMessage = (special) => {
+  if (!special || !special.kind) return "";
+  if (special.kind === 'location') {
+    const latitude = Number(special.latitude);
+    const longitude = Number(special.longitude);
+    const hasPoint = Number.isFinite(latitude) && Number.isFinite(longitude);
+    const title = special.name || special.address || 'Геопозиция';
+    const details = [special.address, hasPoint ? `${latitude.toFixed(5)}, ${longitude.toFixed(5)}` : 'Координаты недоступны']
+      .filter((value, index, values) => value && values.indexOf(value) === index)
+      .map(value => `<span>${escapeHtml(value)}</span>`).join('');
+    const mapLink = hasPoint
+      ? `<a class="message-special__action" href="https://yandex.ru/maps/?pt=${longitude},${latitude}&z=16&l=map" target="_blank" rel="noopener noreferrer">Открыть на карте</a>`
+      : '';
+    return `<div class="message-special message-special--location"><i class="material-icons">location_on</i><div><strong>${escapeHtml(title)}</strong>${details}${mapLink}</div></div>`;
+  }
+  if (special.kind === 'contact') {
+    const contacts = Array.isArray(special.contacts) ? special.contacts : [];
+    const rows = contacts.length ? contacts.map(contact => {
+      const phone = String(contact.phone || '');
+      const safePhone = phone.replace(/[^+\d]/g, '');
+      return `<div class="message-special__contact"><i class="material-icons">person</i><div><strong>${escapeHtml(contact.name || 'Контакт')}</strong>${phone ? `<a href="tel:${safePhone}">${escapeHtml(phone)}</a>` : '<span>Номер не указан</span>'}</div></div>`;
+    }).join('') : '<span>Данные контакта недоступны</span>';
+    return `<div class="message-special message-special--contact">${rows}</div>`;
+  }
+  if (special.kind === 'poll') {
+    const options = Array.isArray(special.options) ? special.options : [];
+    const rows = options.map(option => `<div class="message-special__poll-option"><span></span>${escapeHtml(option)}</div>`).join('');
+    const update = special.is_update ? '<small>Обновление результатов</small>' : '';
+    return `<div class="message-special message-special--poll"><div class="message-special__poll-title"><i class="material-icons">poll</i><strong>${escapeHtml(special.question || 'Опрос')}</strong></div>${rows || '<span>Варианты ответа недоступны</span>'}${update}</div>`;
+  }
+  if (special.kind === 'group_invite') {
+    const rawUrl = String(special.url || '');
+    const safeUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : '';
+    return `<div class="message-special"><i class="material-icons">group_add</i><div><strong>${escapeHtml(special.title || 'Приглашение в группу')}</strong>${safeUrl ? `<a class="message-special__action" href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">Открыть приглашение</a>` : ''}</div></div>`;
+  }
+  if (special.kind === 'dice') {
+    return `<div class="message-special message-special--dice"><strong>${escapeHtml(special.emoji || '🎲')}</strong>${special.value ? `<span>Выпало: ${escapeHtml(special.value)}</span>` : ''}</div>`;
+  }
+  if (special.kind === 'service') {
+    return `<div class="message-special message-special--service"><i class="material-icons">info</i><span>${escapeHtml(special.label || 'Служебное событие')}</span></div>`;
+  }
+  if (special.kind === 'reaction') {
+    return `<div class="message-special message-special--service"><i class="material-icons">add_reaction</i><span>Реакция ${escapeHtml(special.emoji || '')}</span></div>`;
+  }
+  return `<div class="message-special message-special--unsupported"><i class="material-icons">help_outline</i><span>${escapeHtml(special.label || 'Неподдерживаемый тип сообщения')}</span></div>`;
+};
+
 const createIdempotencyKey = () => {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   const bytes = new Uint8Array(16);
@@ -880,7 +927,12 @@ const renderMessages = (messages, forceScroll = false) => {
     div.dataset.msgId = msg.id;
     div.dataset.messageDate = msg.telegram_date || new Date().toISOString();
 
-    let content = `<div class="message__text">${escapeHtml(msg.text || "")}</div>`;
+    const specialContent = renderSpecialMessage(msg.special_content);
+    const showRegularText = Boolean(msg.text) && (!specialContent || msg.special_content?.kind === 'unsupported');
+    let content = `${specialContent}${showRegularText ? `<div class="message__text">${escapeHtml(msg.text)}</div>` : ''}`;
+    if (!content) {
+      content = renderSpecialMessage({kind: 'unsupported', label: msg.message_type_display || 'Неподдерживаемый тип сообщения'});
+    }
     if (msg.reply_to_preview) {
       content = `<div class="message__reply-preview">${escapeHtml(msg.reply_to_preview)}</div>` + content;
     }

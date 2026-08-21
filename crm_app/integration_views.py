@@ -93,36 +93,9 @@ class WhatsAppWebhookView(APIView):
 
     @staticmethod
     def _content(message_data):
-        message_data = message_data if isinstance(message_data, dict) else {}
-        kind = message_data.get('typeMessage', 'unknown')
-        text_data = message_data.get('textMessageData') or {}
-        extended = message_data.get('extendedTextMessageData') or {}
-        file_data = message_data.get('fileMessageData') or message_data.get('stickerMessageData') or {}
-        text_data = text_data if isinstance(text_data, dict) else {}
-        extended = extended if isinstance(extended, dict) else {}
-        file_data = file_data if isinstance(file_data, dict) else {}
-        if kind == 'textMessage':
-            return text_data.get('textMessage', ''), None, text_data
-        if kind in {'extendedTextMessage', 'quotedMessage'}:
-            return extended.get('text') or extended.get('textMessage') or '', None, extended
-        if kind in {'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage'}:
-            return file_data.get('caption') or '', file_data.get('downloadUrl'), file_data
-        if kind == 'locationMessage':
-            data = message_data.get('locationMessageData') or {}
-            label = data.get('nameLocation') or data.get('address') or 'Location'
-            return f"{label}: {data.get('latitude')}, {data.get('longitude')}", None, data
-        if kind in {'contactMessage', 'contactsArrayMessage'}:
-            data = message_data.get('contactMessageData') or message_data.get('contactsArrayMessageData') or {}
-            return data.get('displayName') or 'Contact', None, data
-        if kind == 'reactionMessage':
-            data = message_data.get('reactionMessageData') or extended
-            data = data if isinstance(data, dict) else {}
-            return data.get('text') or data.get('emoji') or '', None, data
-        for key in ('buttonsResponseMessageData', 'templateButtonReplyMessage', 'listResponseMessageData'):
-            data = message_data.get(key)
-            if data:
-                return data.get('selectedDisplayText') or data.get('selectedButtonId') or data.get('title') or '', None, data
-        return '', None, message_data
+        from .services.message_content import normalize_green_message
+        normalized = normalize_green_message(message_data)
+        return normalized['text'], normalized['download_url'], normalized['content']
 
     def get(self, request, account_id):
         try:
@@ -221,7 +194,11 @@ class WhatsAppWebhookView(APIView):
             message_id = payload.get('idMessage')
             if not chat_id or not message_id:
                 return Response({'error': 'Missing chatId or idMessage'}, status=status.HTTP_400_BAD_REQUEST)
-            text, download_url, content = self._content(message_data)
+            from .services.message_content import normalize_green_message
+            normalized = normalize_green_message(message_data)
+            text, download_url, content = (
+                normalized['text'], normalized['download_url'], normalized['content']
+            )
             try:
                 event_time = datetime.fromtimestamp(int(payload.get('timestamp')), tz=timezone.get_current_timezone())
             except (TypeError, ValueError, OSError):
@@ -242,17 +219,12 @@ class WhatsAppWebhookView(APIView):
                     sender.get('senderName') or sender.get('senderContactName') or sender.get('chatName')
                 ),
                 occurred_at=event_time,
-                message_type={
-                    'imageMessage': 'photo', 'videoMessage': 'video', 'audioMessage': 'voice',
-                    'documentMessage': 'document', 'stickerMessage': 'sticker',
-                    'locationMessage': 'location', 'contactMessage': 'contact',
-                    'contactsArrayMessage': 'contact', 'reactionMessage': 'text',
-                    'textMessage': 'text', 'extendedTextMessage': 'text', 'quotedMessage': 'text',
-                }.get(raw_type, 'other'),
+                message_type=normalized['message_type'],
                 media_file_id=message_id if download_url else None,
                 reply_to_external_message_id=quoted.get('idMessage') or quoted.get('stanzaId'),
                 metadata={
                     'raw_type': raw_type, 'provider_content': content,
+                    'special_content': normalized['special_content'],
                     'download_url': download_url, 'external_chat_id': chat_id,
                     'green_webhook_type': webhook_type,
                 },

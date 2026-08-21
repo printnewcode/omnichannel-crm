@@ -10,6 +10,7 @@ from channels.db import database_sync_to_async
 from telethon.sessions import StringSession
 
 from ..models import Chat, HistoryImportJob, Message, TelegramAccount
+from .message_content import normalize_green_message, telegram_special_content
 from .provider_ingestion import ingest_provider_message
 from .telegram_client_manager import TelegramClientManager
 from .whatsapp_client import GreenAPIClient
@@ -17,34 +18,12 @@ WHATSAPP_PRIVATE_CHAT_RE = re.compile(r'^\d+(?:@c\.us|@lid)?$', re.IGNORECASE)
 MAX_PRIVATE_CHAT_RE = re.compile(r'^\d+$')
 
 
-MEDIA_TYPES = {
-    'imageMessage': Message.MessageType.PHOTO,
-    'videoMessage': Message.MessageType.VIDEO,
-    'audioMessage': Message.MessageType.VOICE,
-    'documentMessage': Message.MessageType.DOCUMENT,
-    'stickerMessage': Message.MessageType.STICKER,
-}
-
-
 def _green_content(item):
-    message_data = item.get('messageData') if isinstance(item.get('messageData'), dict) else item
-    raw_type = message_data.get('typeMessage') or item.get('typeMessage') or 'textMessage'
-    text = (
-        message_data.get('textMessage')
-        or (message_data.get('textMessageData') or {}).get('textMessage')
-        or (message_data.get('extendedTextMessage') or {}).get('text')
-        or ''
+    normalized = normalize_green_message(item)
+    return (
+        normalized['raw_type'], normalized['text'], normalized['content'],
+        normalized['download_url'], normalized['message_type'], normalized['special_content'],
     )
-    content = message_data.get('fileMessageData') or message_data.get('stickerMessageData') or message_data
-    if not isinstance(content, dict):
-        content = {}
-    download_url = (
-        message_data.get('downloadUrl')
-        or message_data.get('downloadUrlJpeg')
-        or content.get('downloadUrl')
-        or content.get('downloadUrlJpeg')
-    )
-    return raw_type, text or content.get('caption') or '', content, download_url
 
 
 def _green_datetime(value):
@@ -63,8 +42,21 @@ def _ingest_green_items(chat, items):
         external_message_id = item.get('idMessage')
         if not external_message_id:
             continue
-        raw_type, text, content, download_url = _green_content(item)
+        raw_type, text, content, download_url, message_type, special_content = _green_content(item)
         quoted = item.get('quotedMessage') or item.get('contextInfo') or {}
+        if raw_type == 'reactionMessage':
+            target_id = quoted.get('idMessage') or quoted.get('stanzaId')
+            target = Message.objects.filter(
+                chat=chat, external_message_id=str(target_id)
+            ).first() if target_id else None
+            if target:
+                from .reactions import set_actor_reaction
+                actor = 'self' if item.get('type') == 'outgoing' else f"peer:{item.get('senderId') or 'remote'}"
+                set_actor_reaction(
+                    target.id, actor, (special_content or {}).get('emoji', ''),
+                    chosen=actor == 'self',
+                )
+                continue
         message, was_created, _ = ingest_provider_message(
             account=chat.telegram_account,
             external_chat_id=external_chat_id,
@@ -73,10 +65,16 @@ def _ingest_green_items(chat, items):
             sender_id=item.get('senderId'),
             sender_name=item.get('senderName') or item.get('senderContactName') or chat.title,
             occurred_at=_green_datetime(item.get('timestamp')),
-            message_type=MEDIA_TYPES.get(raw_type, Message.MessageType.TEXT),
+            message_type=message_type,
             media_file_id=external_message_id if download_url else None,
             reply_to_external_message_id=quoted.get('idMessage') or quoted.get('stanzaId'),
-            metadata={'raw_type': raw_type, 'provider_content': content, 'download_url': download_url, 'external_chat_id': str(external_chat_id)},
+            metadata={
+                'raw_type': raw_type,
+                'provider_content': content,
+                'special_content': special_content,
+                'download_url': download_url,
+                'external_chat_id': str(external_chat_id),
+            },
             chat_type=Chat.ChatType.PRIVATE,
             is_outgoing=item.get('type') == 'outgoing',
             status=Message.MessageStatus.SENT if item.get('type') == 'outgoing' else Message.MessageStatus.RECEIVED,
@@ -100,6 +98,7 @@ def _persist_telegram_message(chat, item, manager):
     reply = None
     if item.reply_to_msg_id:
         reply = Message.objects.filter(chat=chat, telegram_id=item.reply_to_msg_id).first()
+    special_content = telegram_special_content(item)
     return Message.objects.get_or_create(
         chat=chat,
         telegram_id=item.id,
@@ -111,6 +110,7 @@ def _persist_telegram_message(chat, item, manager):
             'telegram_date': item.date,
             'reply_to_message': reply,
             'media_caption': item.message if item.media else None,
+            'metadata': {'special_content': special_content} if special_content else {},
         },
     )
 
@@ -151,7 +151,7 @@ async def _import_telegram_messages(client, entity, chat, count, manager):
     pending_replies = []
     async for item in client.iter_messages(entity, limit=count):
         processed += 1
-        if not item.message and not item.media:
+        if not item.message and not item.media and not getattr(item, 'action', None):
             continue
         message, was_created = await database_sync_to_async(_persist_telegram_message)(chat, item, manager)
         if was_created:

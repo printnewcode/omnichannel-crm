@@ -245,6 +245,8 @@ class Message(models.Model):
         STICKER = 'sticker', 'Стикер'
         LOCATION = 'location', 'Локация'
         CONTACT = 'contact', 'Контакт'
+        POLL = 'poll', 'Опрос'
+        SERVICE = 'service', 'Служебное сообщение'
         OTHER = 'other', 'Другое'
     
     class MessageStatus(models.TextChoices):
