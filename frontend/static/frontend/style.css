@@ -1354,6 +1354,18 @@ body, .sidebar, .main-chat, .chat-header, .chat-input-area, .search-bar,
   white-space: nowrap;
 }
 .message--incoming .message__reply-preview { background: rgba(var(--accent-rgb), .12); }
+.message__forwarded {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 5px;
+  color: var(--accent);
+  font-size: .78rem;
+  font-weight: 650;
+  line-height: 1.2;
+}
+.message__forwarded .material-icons { flex: 0 0 auto; font-size: 15px; }
+.message--outgoing .message__forwarded { color: rgba(255, 255, 255, .88); }
 .message__media--sticker { background: transparent; margin-bottom: 2px; }
 .message__media--sticker img { width: min(190px, 42vw); height: min(190px, 42vw); object-fit: contain; }
 .message__media--sticker .sticker-video, .tgs-sticker { width: min(190px, 42vw); height: min(190px, 42vw); display: block; object-fit: contain; }

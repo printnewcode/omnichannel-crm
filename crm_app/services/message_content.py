@@ -24,6 +24,8 @@ GREEN_MESSAGE_TYPES = {
     'buttonsResponseMessage': 'text',
     'templateButtonReplyMessage': 'text',
     'listResponseMessage': 'text',
+    'editedMessage': 'text',
+    'deletedMessage': 'service',
 }
 
 
@@ -58,7 +60,33 @@ def _contact_item(value: Any) -> dict:
     return {'name': str(name or 'Контакт'), 'phone': str(phone or ''), 'vcard': vcard}
 
 
+def _forward_name(value: Any) -> str:
+    data = _dict(value)
+    return str(
+        data.get('forwardedFromName') or data.get('forwardFromName')
+        or data.get('forwardSenderName') or data.get('forwardedFrom') or ''
+    ).strip()
+
+
+def _green_forward_info(root: dict, data: dict, content: dict) -> dict | None:
+    candidates = [content, data, root]
+    def is_forwarded(item):
+        try:
+            score = int(item.get('forwardingScore') or 0)
+        except (TypeError, ValueError):
+            score = 0
+        return item.get('isForwarded') is True or score > 0
+
+    forwarded = any(is_forwarded(item) for item in candidates)
+    if not forwarded:
+        return None
+    name = next((_forward_name(item) for item in candidates if _forward_name(item)), '')
+    return {'is_forwarded': True, 'from_name': name or None}
+
+
 def _green_special(raw_type: str, content: dict) -> dict | None:
+    if raw_type == 'deletedMessage':
+        return {'kind': 'service', 'label': 'Сообщение удалено'}
     if raw_type == 'locationMessage':
         return {
             'kind': 'location',
@@ -102,20 +130,24 @@ def normalize_green_message(payload: Any) -> dict:
     root = _dict(payload)
     data = _dict(root.get('messageData')) or root
     raw_type = str(data.get('typeMessage') or root.get('typeMessage') or 'unknown')
-    if data.get('isDeleted') or root.get('isDeleted'):
+    if data.get('isDeleted') or root.get('isDeleted') or raw_type == 'deletedMessage':
+        deleted = _dict(data.get('deletedMessageData')) or data
         return {
             'raw_type': raw_type,
             'message_type': 'service',
             'text': '',
-            'content': data,
+            'content': deleted,
             'special_content': {'kind': 'service', 'label': 'Сообщение удалено'},
             'download_url': None,
+            'forward_info': None,
         }
     text_data = _dict(data.get('textMessageData'))
     extended = _dict(data.get('extendedTextMessageData')) or _dict(data.get('extendedTextMessage'))
     file_data = _dict(data.get('fileMessageData')) or _dict(data.get('stickerMessageData'))
 
-    if raw_type == 'locationMessage':
+    if raw_type == 'editedMessage':
+        content = _dict(data.get('editedMessageData')) or data
+    elif raw_type == 'locationMessage':
         content = _dict(data.get('locationMessageData')) or _dict(data.get('location')) or data
     elif raw_type == 'contactMessage':
         content = _dict(data.get('contactMessageData')) or _dict(data.get('contact')) or data
@@ -147,6 +179,7 @@ def normalize_green_message(payload: Any) -> dict:
 
     text = (
         data.get('textMessage') or text_data.get('textMessage')
+        or content.get('textMessage')
         or extended.get('text') or extended.get('textMessage')
         or content.get('caption') or content.get('text') or content.get('body')
         or content.get('selectedDisplayText')
@@ -171,7 +204,28 @@ def normalize_green_message(payload: Any) -> dict:
         'content': content,
         'special_content': special,
         'download_url': download_url,
+        'forward_info': _green_forward_info(root, data, content),
     }
+
+
+def telegram_forward_info(message: Any) -> dict | None:
+    """Return the visible Telegram forward origin when Telethon exposes it."""
+    forward = getattr(message, 'forward', None) or getattr(message, 'fwd_from', None)
+    if not forward:
+        return None
+    sender = getattr(forward, 'sender', None)
+    sender_name = ' '.join(filter(None, [
+        getattr(sender, 'first_name', None), getattr(sender, 'last_name', None),
+    ]))
+    name = (
+        getattr(forward, 'from_name', None)
+        or getattr(forward, 'post_author', None)
+        or sender_name
+        or getattr(sender, 'title', None)
+        or getattr(sender, 'username', None)
+        or ''
+    )
+    return {'is_forwarded': True, 'from_name': str(name).strip() or None}
 
 
 def telegram_special_content(message: Any) -> dict | None:
@@ -228,5 +282,20 @@ def special_content_from_metadata(message_type: str, metadata: Any) -> dict | No
     if message_type == 'poll':
         return {'kind': 'poll', 'question': 'Опрос', 'options': []}
     if message_type in {'other', 'service'}:
-        return {'kind': 'unsupported', 'label': raw_type or 'Неизвестный тип сообщения'}
+        return {'kind': 'unsupported', 'label': 'Неподдерживаемое сообщение'}
+    return None
+
+
+def forward_info_from_metadata(metadata: Any) -> dict | None:
+    source = _dict(metadata)
+    stored = source.get('forward_info')
+    if isinstance(stored, dict) and stored.get('is_forwarded'):
+        return {
+            'is_forwarded': True,
+            'from_name': str(stored.get('from_name') or '').strip() or None,
+        }
+    raw_type = str(source.get('raw_type') or '')
+    provider_content = _dict(source.get('provider_content'))
+    if raw_type and provider_content:
+        return normalize_green_message({**provider_content, 'typeMessage': raw_type})['forward_info']
     return None

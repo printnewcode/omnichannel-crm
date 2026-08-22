@@ -10,7 +10,7 @@ from channels.db import database_sync_to_async
 from telethon.sessions import StringSession
 
 from ..models import Chat, HistoryImportJob, Message, TelegramAccount
-from .message_content import normalize_green_message, telegram_special_content
+from .message_content import normalize_green_message, telegram_forward_info, telegram_special_content
 from .provider_ingestion import ingest_provider_message
 from .telegram_client_manager import TelegramClientManager
 from .whatsapp_client import GreenAPIClient
@@ -23,6 +23,7 @@ def _green_content(item):
     return (
         normalized['raw_type'], normalized['text'], normalized['content'],
         normalized['download_url'], normalized['message_type'], normalized['special_content'],
+        normalized['forward_info'],
     )
 
 
@@ -42,7 +43,7 @@ def _ingest_green_items(chat, items):
         external_message_id = item.get('idMessage')
         if not external_message_id:
             continue
-        raw_type, text, content, download_url, message_type, special_content = _green_content(item)
+        raw_type, text, content, download_url, message_type, special_content, forward_info = _green_content(item)
         quoted = item.get('quotedMessage') or item.get('contextInfo') or {}
         if raw_type == 'reactionMessage':
             target_id = quoted.get('idMessage') or quoted.get('stanzaId')
@@ -57,10 +58,14 @@ def _ingest_green_items(chat, items):
                     chosen=actor == 'self',
                 )
                 continue
+        is_mutation = raw_type in {'editedMessage', 'deletedMessage'}
+        target_message_id = (
+            content.get('stanzaId') or content.get('idMessage')
+        ) if is_mutation else None
         message, was_created, _ = ingest_provider_message(
             account=chat.telegram_account,
             external_chat_id=external_chat_id,
-            external_message_id=external_message_id,
+            external_message_id=target_message_id or external_message_id,
             text=text,
             sender_id=item.get('senderId'),
             sender_name=item.get('senderName') or item.get('senderContactName') or chat.title,
@@ -72,6 +77,7 @@ def _ingest_green_items(chat, items):
                 'raw_type': raw_type,
                 'provider_content': content,
                 'special_content': special_content,
+                'forward_info': forward_info,
                 'download_url': download_url,
                 'external_chat_id': str(external_chat_id),
             },
@@ -79,6 +85,7 @@ def _ingest_green_items(chat, items):
             is_outgoing=item.get('type') == 'outgoing',
             status=Message.MessageStatus.SENT if item.get('type') == 'outgoing' else Message.MessageStatus.RECEIVED,
             publish=False,
+            update_existing=is_mutation,
         )
         if was_created:
             created += 1
@@ -99,6 +106,7 @@ def _persist_telegram_message(chat, item, manager):
     if item.reply_to_msg_id:
         reply = Message.objects.filter(chat=chat, telegram_id=item.reply_to_msg_id).first()
     special_content = telegram_special_content(item)
+    forward_info = telegram_forward_info(item)
     return Message.objects.get_or_create(
         chat=chat,
         telegram_id=item.id,
@@ -110,7 +118,10 @@ def _persist_telegram_message(chat, item, manager):
             'telegram_date': item.date,
             'reply_to_message': reply,
             'media_caption': item.message if item.media else None,
-            'metadata': {'special_content': special_content} if special_content else {},
+            'metadata': {
+                **({'special_content': special_content} if special_content else {}),
+                **({'forward_info': forward_info} if forward_info else {}),
+            },
         },
     )
 

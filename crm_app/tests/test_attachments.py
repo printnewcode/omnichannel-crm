@@ -161,3 +161,67 @@ class TelegramIncomingMediaTests(TransactionTestCase):
             self.assertTrue(path.endswith('/source-name.svg'))
             self.assertEqual(record.metadata['original_filename'], 'source-name.svg')
             self.assertTrue((Path(temp_media) / path).is_file())
+
+    def test_lazy_download_does_not_touch_deferred_fields_in_async_context(self):
+        with tempfile.TemporaryDirectory() as temp_media:
+            account = TelegramAccount.objects.create(
+                name='Deferred media account',
+                account_type=TelegramAccount.AccountType.PERSONAL,
+                status=TelegramAccount.AccountStatus.ACTIVE,
+                api_id=12345,
+                api_hash='hash',
+                session_string='',
+            )
+            chat = Chat.objects.create(
+                telegram_id=99903,
+                telegram_account=account,
+                chat_type=Chat.ChatType.PRIVATE,
+            )
+            record = Message.objects.create(
+                chat=chat,
+                telegram_id=654,
+                message_type=Message.MessageType.PHOTO,
+                metadata={'existing': 'value'},
+                status=Message.MessageStatus.RECEIVED,
+                telegram_date=timezone.now(),
+            )
+            deferred = Message.objects.select_related('chat__telegram_account').only(
+                'id', 'telegram_id', 'message_type', 'chat__id',
+                'chat__telegram_id', 'chat__telegram_account__id',
+            ).get(pk=record.pk)
+            telegram_message = SimpleNamespace(
+                id=654,
+                media=object(),
+                file=SimpleNamespace(name='telegram-photo.jpg'),
+            )
+
+            class FakeClient:
+                async def connect(self):
+                    return None
+
+                async def disconnect(self):
+                    return None
+
+                async def get_dialogs(self, limit=None):
+                    return []
+
+                async def get_entity(self, chat_id):
+                    return chat_id
+
+                async def get_messages(self, _entity, ids):
+                    return [telegram_message]
+
+                async def download_media(self, _message, file):
+                    Path(file).write_bytes(b'jpeg')
+                    return file
+
+            manager = TelegramClientManager()
+            with override_settings(MEDIA_ROOT=Path(temp_media)), patch.object(
+                manager, '_create_client', return_value=FakeClient()
+            ):
+                path = async_to_sync(manager._download_with_fresh_client)(deferred)
+
+            record.refresh_from_db()
+            self.assertTrue(path.endswith('/telegram-photo.jpg'))
+            self.assertEqual(record.metadata['existing'], 'value')
+            self.assertEqual(record.metadata['original_filename'], 'telegram-photo.jpg')

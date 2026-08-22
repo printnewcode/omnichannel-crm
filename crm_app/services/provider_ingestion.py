@@ -31,6 +31,7 @@ def ingest_provider_message(
     is_outgoing=False,
     status=Message.MessageStatus.RECEIVED,
     publish=True,
+    update_existing=False,
 ):
     raw_chat_id = str(external_chat_id)
     base_chat_id = raw_chat_id.split('@', 1)[0]
@@ -97,6 +98,19 @@ def ingest_provider_message(
             unread_count=F('unread_count') + (0 if is_outgoing else 1),
             last_message_at=event_time,
         )
+    elif update_existing:
+        message.text = text or None
+        message.message_type = message_type
+        message.metadata = {
+            **(message.metadata if isinstance(message.metadata, dict) else {}),
+            'provider': account.account_type,
+            **(metadata or {}),
+        }
+        update_fields = ['text', 'message_type', 'metadata', 'updated_at']
+        if media_file_id is not None:
+            message.media_file_id = media_file_id
+            update_fields.append('media_file_id')
+        message.save(update_fields=update_fields)
 
     if publish:
         transaction.on_commit(lambda message_id=message.id: publish_message(message_id))

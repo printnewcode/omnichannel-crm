@@ -8,7 +8,11 @@ from django.utils import timezone
 from crm_app.models import Chat, Message, TelegramAccount
 from crm_app.serializers import MessageSerializer
 from crm_app.services.history_import import _ingest_green_items
-from crm_app.services.message_content import normalize_green_message, telegram_special_content
+from crm_app.services.message_content import (
+    normalize_green_message,
+    telegram_forward_info,
+    telegram_special_content,
+)
 from crm_app.services.telegram_client_manager import TelegramClientManager
 
 
@@ -100,6 +104,54 @@ class GreenSpecialMessageTests(TestCase):
         self.assertEqual(button['message_type'], Message.MessageType.TEXT)
         self.assertEqual(button['text'], 'Подтверждаю')
 
+    def test_edited_message_is_normalized_to_new_text(self):
+        normalized = normalize_green_message({
+            'typeMessage': 'editedMessage',
+            'editedMessageData': {
+                'textMessage': 'Исправленный текст',
+                'stanzaId': 'original-message',
+            },
+        })
+
+        self.assertEqual(normalized['message_type'], Message.MessageType.TEXT)
+        self.assertEqual(normalized['text'], 'Исправленный текст')
+        self.assertEqual(normalized['content']['stanzaId'], 'original-message')
+
+    def test_green_forward_is_exposed_even_without_origin_name(self):
+        normalized = normalize_green_message({
+            'typeMessage': 'extendedTextMessage',
+            'extendedTextMessageData': {
+                'text': 'Forwarded text',
+                'isForwarded': True,
+                'forwardingScore': 2,
+            },
+        })
+
+        self.assertEqual(normalized['forward_info'], {
+            'is_forwarded': True,
+            'from_name': None,
+        })
+
+    def test_legacy_green_forward_is_exposed_by_serializer(self):
+        message = Message.objects.create(
+            chat=self.chat, external_message_id='legacy-forward',
+            message_type=Message.MessageType.TEXT, text='Forwarded text',
+            telegram_date=timezone.now(),
+            metadata={
+                'raw_type': 'extendedTextMessage',
+                'provider_content': {
+                    'text': 'Forwarded text',
+                    'isForwarded': True,
+                    'forwardingScore': 1,
+                },
+            },
+        )
+
+        self.assertEqual(MessageSerializer(message).data['forward_info'], {
+            'is_forwarded': True,
+            'from_name': None,
+        })
+
     def test_future_webhook_message_is_stored_with_ui_content(self):
         payload = {
             'typeWebhook': 'incomingMessageReceived',
@@ -133,7 +185,60 @@ class GreenSpecialMessageTests(TestCase):
         )
         data = MessageSerializer(message).data
         self.assertEqual(data['special_content']['kind'], 'unsupported')
-        self.assertEqual(data['special_content']['label'], 'futureMagicMessage')
+        self.assertEqual(data['special_content']['label'], 'Неподдерживаемое сообщение')
+
+    def test_legacy_edited_message_exposes_text_instead_of_provider_type(self):
+        message = Message.objects.create(
+            chat=self.chat, external_message_id='legacy-edit-event',
+            message_type=Message.MessageType.OTHER, telegram_date=timezone.now(),
+            metadata={
+                'raw_type': 'editedMessage',
+                'provider_content': {
+                    'textMessage': 'Исправленный старый текст',
+                    'stanzaId': 'legacy-original',
+                },
+            },
+        )
+
+        data = MessageSerializer(message).data
+
+        self.assertEqual(data['message_type'], Message.MessageType.TEXT)
+        self.assertEqual(data['text'], 'Исправленный старый текст')
+        self.assertIsNone(data['special_content'])
+
+    def test_live_edited_message_updates_original_without_extra_bubble(self):
+        original = Message.objects.create(
+            chat=self.chat, external_message_id='original-message', text='Старый текст',
+            message_type=Message.MessageType.TEXT, telegram_date=timezone.now(),
+        )
+        payload = {
+            'typeWebhook': 'incomingMessageReceived',
+            'instanceData': {'idInstance': 77},
+            'timestamp': 1773548400,
+            'idMessage': 'edit-event',
+            'senderData': {
+                'chatId': '16101503', 'sender': '16101503',
+                'senderName': 'Клиент', 'chatType': 'user',
+            },
+            'messageData': {
+                'typeMessage': 'editedMessage',
+                'editedMessageData': {
+                    'textMessage': 'Новый текст',
+                    'stanzaId': 'original-message',
+                },
+            },
+        }
+
+        response = self.client.post(
+            reverse('max-webhook', kwargs={'account_id': self.account.id}),
+            data=json.dumps(payload), content_type='application/json',
+        )
+
+        original.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(original.text, 'Новый текст')
+        self.assertEqual(original.message_type, Message.MessageType.TEXT)
+        self.assertFalse(Message.objects.filter(external_message_id='edit-event').exists())
 
     def test_history_reaction_updates_original_message_without_empty_bubble(self):
         target = Message.objects.create(
@@ -157,6 +262,19 @@ class GreenSpecialMessageTests(TestCase):
 
 
 class TelegramSpecialMessageTests(TestCase):
+    def test_telegram_forward_includes_origin_when_available(self):
+        message = SimpleNamespace(
+            forward=None,
+            fwd_from=SimpleNamespace(
+                from_name='Иван', post_author=None, sender=None,
+            ),
+        )
+
+        self.assertEqual(telegram_forward_info(message), {
+            'is_forwarded': True,
+            'from_name': 'Иван',
+        })
+
     def test_telegram_poll_contact_location_dice_and_service(self):
         manager = TelegramClientManager()
         poll = SimpleNamespace(

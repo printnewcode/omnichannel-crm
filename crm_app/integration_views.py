@@ -203,12 +203,16 @@ class WhatsAppWebhookView(APIView):
                 event_time = datetime.fromtimestamp(int(payload.get('timestamp')), tz=timezone.get_current_timezone())
             except (TypeError, ValueError, OSError):
                 event_time = timezone.now()
-            raw_type = message_data.get('typeMessage', 'unknown')
+            raw_type = normalized['raw_type']
+            is_mutation = raw_type in {'editedMessage', 'deletedMessage'}
+            target_message_id = (
+                content.get('stanzaId') or content.get('idMessage')
+            ) if is_mutation else None
             quoted = message_data.get('quotedMessage') or (message_data.get('extendedTextMessageData') or {}).get('quotedMessage') or {}
             message, created, _ = ingest_provider_message(
                 account=account,
                 external_chat_id=chat_id,
-                external_message_id=message_id,
+                external_message_id=target_message_id or message_id,
                 text=text,
                 sender_id=sender.get('sender'),
                 # For outgoing webhooks senderName is the connected account;
@@ -225,6 +229,7 @@ class WhatsAppWebhookView(APIView):
                 metadata={
                     'raw_type': raw_type, 'provider_content': content,
                     'special_content': normalized['special_content'],
+                    'forward_info': normalized['forward_info'],
                     'download_url': download_url, 'external_chat_id': chat_id,
                     'green_webhook_type': webhook_type,
                 },
@@ -232,6 +237,7 @@ class WhatsAppWebhookView(APIView):
                 is_bot=peer_is_bot,
                 is_outgoing=is_outgoing,
                 status=Message.MessageStatus.SENT if is_outgoing else Message.MessageStatus.RECEIVED,
+                update_existing=is_mutation,
             )
             if created and download_url:
                 download_green_api_media_task.delay(message.id)

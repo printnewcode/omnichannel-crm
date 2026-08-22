@@ -36,7 +36,7 @@ from telethon.errors import (
     ApiIdInvalidError,
 )
 from ..models import TelegramAccount
-from .message_content import telegram_special_content
+from .message_content import telegram_forward_info, telegram_special_content
 
 logger = logging.getLogger(__name__)
 
@@ -602,6 +602,7 @@ class TelegramClientManager:
                                 'metadata': {
                                     'reactions': telegram_reaction_summary(getattr(message, 'reactions', None)),
                                     'special_content': telegram_special_content(message),
+                                    'forward_info': telegram_forward_info(message),
                                 }
                             }
                         )
@@ -783,59 +784,95 @@ class TelegramClientManager:
 
     def download_media_by_message_id_sync(self, message) -> Optional[str]:
         """Sync версия для скачивания медиа по message.telegram_id"""
-        import asyncio
         import concurrent.futures
 
-        # Используем ThreadPoolExecutor для выполнения в фоне
+        # Pass only the primary key across the sync/async boundary. The object
+        # returned by the API queryset contains deferred fields; touching one
+        # from the Telethon loop would make Django perform synchronous ORM I/O
+        # in an async context.
+        message_id = message.pk
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(self._download_in_background, message)
+            future = executor.submit(self._download_in_background, message_id)
             try:
-                return future.result(timeout=30)  # 30 секунд таймаут
+                return future.result(timeout=30)
             except concurrent.futures.TimeoutError:
                 raise Exception("Download timeout")
-            except Exception as e:
-                raise e
 
-    def _download_in_background(self, message) -> Optional[str]:
+    def _download_in_background(self, message_id: int) -> Optional[str]:
         """Выполнить скачивание в фоне"""
         try:
-            return self.run_async_sync(self._download_with_fresh_client(message))
+            return self.run_async_sync(self._download_with_fresh_client(message_id))
         except Exception as e:
             logger.error(f"Error in background download: {e}")
             raise
 
-    async def _download_with_fresh_client(self, message) -> Optional[str]:
+    @staticmethod
+    def _telegram_download_context(message_id: int) -> dict:
+        """Load every ORM value needed by async Telegram media download."""
+        from ..models import Message
+
+        message = Message.objects.select_related('chat__telegram_account').get(pk=message_id)
+        account = message.chat.telegram_account
+        return {
+            'message_id': message.id,
+            'telegram_message_id': message.telegram_id,
+            'message_type': message.message_type,
+            'metadata': dict(message.metadata or {}),
+            'chat_telegram_id': message.chat.telegram_id,
+            'account_id': account.id,
+            'session_string': account.session_string or '',
+            'api_id': account.api_id,
+            'api_hash': account.api_hash,
+        }
+
+    @staticmethod
+    def _store_downloaded_media(message_id: int, relative_path: str, metadata: dict) -> None:
+        from ..models import Message
+
+        Message.objects.filter(pk=message_id).update(
+            media_file_path=relative_path,
+            metadata=metadata,
+            updated_at=timezone.now(),
+        )
+
+    async def _download_with_fresh_client(self, message_or_id) -> Optional[str]:
         """Скачать медиа используя новый клиент"""
-        from telethon import TelegramClient
         from telethon.sessions import StringSession
 
-        # Найти аккаунт для этого сообщения
-        account = await sync_to_async(lambda: message.chat.telegram_account)()
+        message_id = getattr(message_or_id, 'pk', message_or_id)
+        context = await database_sync_to_async(self._telegram_download_context)(message_id)
 
-        # Создать новый клиент для скачивания
-        client = self._create_client(StringSession(account.session_string), account.api_id, account.api_hash)
+        client = self._create_client(
+            StringSession(context['session_string']),
+            context['api_id'],
+            context['api_hash'],
+        )
         await client.connect()
 
         try:
-            # Получить сообщение из Telegram по ID
-            logger.info(f"Downloading media for message {message.id} (telegram_id: {message.telegram_id}) in chat {message.chat.telegram_id}")
+            logger.info(
+                'Downloading media for message %s (telegram_id: %s) in chat %s',
+                context['message_id'], context['telegram_message_id'], context['chat_telegram_id'],
+            )
 
             # A fresh StringSession has no in-memory entity cache. Loading dialogs
             # restores the access hashes required for private users.
             await client.get_dialogs(limit=None)
-            chat_entity = await client.get_entity(message.chat.telegram_id)
-            telegram_message = await client.get_messages(chat_entity, ids=[message.telegram_id])
+            chat_entity = await client.get_entity(context['chat_telegram_id'])
+            telegram_message = await client.get_messages(chat_entity, ids=[context['telegram_message_id']])
 
             if not telegram_message or not telegram_message[0]:
-                raise Exception(f"Message {message.telegram_id} not found in chat {message.chat.telegram_id}")
+                raise Exception(
+                    f"Message {context['telegram_message_id']} not found in chat {context['chat_telegram_id']}"
+                )
 
             telegram_message = telegram_message[0]
 
             if not telegram_message.media:
-                raise Exception(f"Message {message.telegram_id} has no media")
+                raise Exception(f"Message {context['telegram_message_id']} has no media")
 
-            file_name = self._telegram_media_filename(telegram_message, message.message_type)
-            relative_dir = Path('telegram') / message.message_type / str(message.id)
+            file_name = self._telegram_media_filename(telegram_message, context['message_type'])
+            relative_dir = Path('telegram') / context['message_type'] / str(context['message_id'])
             media_dir = Path(settings.MEDIA_ROOT) / relative_dir
             media_dir.mkdir(parents=True, exist_ok=True)
             local_path = media_dir / file_name
@@ -845,14 +882,13 @@ class TelegramClientManager:
                 raise RuntimeError('Telegram не вернул содержимое файла.')
 
             relative_path = (relative_dir / file_name).as_posix()
-            message.media_file_path = relative_path
-            message.metadata = {
-                **(message.metadata or {}),
+            metadata = {
+                **context['metadata'],
                 'original_filename': file_name,
                 'media_size': local_path.stat().st_size,
             }
-            await database_sync_to_async(message.save)(
-                update_fields=['media_file_path', 'metadata', 'updated_at']
+            await database_sync_to_async(self._store_downloaded_media)(
+                context['message_id'], relative_path, metadata
             )
 
             logger.info(f"Successfully downloaded media to {local_path}")
@@ -863,39 +899,38 @@ class TelegramClientManager:
 
     async def download_media_by_message_id(self, message) -> Optional[str]:
         """Скачать медиа по message.telegram_id для ленивой загрузки"""
-        # Найти подходящий клиент (активный)
-        client = None
-        account = None
-        for acc_id, cl in self._clients.items():
-            if cl.is_connected():
-                client = cl
-                account = await sync_to_async(TelegramAccount.objects.get)(id=acc_id)
-                break
+        message_id = getattr(message, 'pk', message)
+        context = await database_sync_to_async(self._telegram_download_context)(message_id)
+        client = self._clients.get(context['account_id'])
 
-        if not client or not account:
+        if not client or not client.is_connected():
             raise Exception("No active Telegram client available")
 
         try:
-            logger.info(f"Downloading media for message {message.id} (telegram_id: {message.telegram_id}) in chat {message.chat.telegram_id}")
+            logger.info(
+                'Downloading media for message %s (telegram_id: %s) in chat %s',
+                context['message_id'], context['telegram_message_id'], context['chat_telegram_id'],
+            )
 
-            # Получить сообщение из Telegram по ID
-            chat_entity = await client.get_entity(message.chat.telegram_id)
+            chat_entity = await client.get_entity(context['chat_telegram_id'])
             logger.info(f"Got chat entity: {chat_entity}")
 
-            telegram_message = await client.get_messages(chat_entity, ids=[message.telegram_id])
+            telegram_message = await client.get_messages(chat_entity, ids=[context['telegram_message_id']])
             logger.info(f"Got messages: {len(telegram_message) if telegram_message else 0}")
 
             if not telegram_message or not telegram_message[0]:
-                raise Exception(f"Message {message.telegram_id} not found in chat {message.chat.telegram_id}")
+                raise Exception(
+                    f"Message {context['telegram_message_id']} not found in chat {context['chat_telegram_id']}"
+                )
 
             telegram_message = telegram_message[0]
             logger.info(f"Message has media: {bool(telegram_message.media)}")
 
             if not telegram_message.media:
-                raise Exception(f"Message {message.telegram_id} has no media")
+                raise Exception(f"Message {context['telegram_message_id']} has no media")
 
-            file_name = self._telegram_media_filename(telegram_message, message.message_type)
-            relative_dir = Path('telegram') / message.message_type / str(message.id)
+            file_name = self._telegram_media_filename(telegram_message, context['message_type'])
+            relative_dir = Path('telegram') / context['message_type'] / str(context['message_id'])
             media_dir = Path(settings.MEDIA_ROOT) / relative_dir
             media_dir.mkdir(parents=True, exist_ok=True)
             local_path = media_dir / file_name
@@ -905,14 +940,13 @@ class TelegramClientManager:
                 raise RuntimeError('Telegram не вернул содержимое файла.')
 
             relative_path = (relative_dir / file_name).as_posix()
-            message.media_file_path = relative_path
-            message.metadata = {
-                **(message.metadata or {}),
+            metadata = {
+                **context['metadata'],
                 'original_filename': file_name,
                 'media_size': local_path.stat().st_size,
             }
-            await database_sync_to_async(message.save)(
-                update_fields=['media_file_path', 'metadata', 'updated_at']
+            await database_sync_to_async(self._store_downloaded_media)(
+                context['message_id'], relative_path, metadata
             )
 
             return relative_path
@@ -2022,6 +2056,7 @@ class TelegramClientManager:
                                             getattr(message_data, 'reactions', None)
                                         ),
                                         'special_content': telegram_special_content(message_data),
+                                        'forward_info': telegram_forward_info(message_data),
                                     },
                                 )
                                 logger.info(f"Saved NEW message {message_data.id} in chat {chat_id} during sync")

@@ -626,6 +626,7 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
             'message_type', 'status', 'text', 'is_outgoing',
             'from_user_id', 'from_user_name', 'from_user_username',
             'media_file_id', 'media_file_path', 'media_caption',
+            'metadata',
             'telegram_date', 'created_at', 'updated_at', 'reply_to_message_id',
             'chat__id', 'chat__title', 'chat__telegram_account_id',
             'chat__telegram_account__id', 'chat__telegram_account__account_type',

@@ -113,6 +113,7 @@ class MessageSerializer(serializers.ModelSerializer):
     can_react = serializers.SerializerMethodField()
     metadata = serializers.SerializerMethodField()
     special_content = serializers.SerializerMethodField()
+    forward_info = serializers.SerializerMethodField()
     
     class Meta:
         model = Message
@@ -124,11 +125,30 @@ class MessageSerializer(serializers.ModelSerializer):
             'media_file_id', 'media_file_path', 'media_file_name', 'media_caption',
             'telegram_date', 'created_at', 'updated_at',
             'reply_to_message_id', 'reply_to_message', 'reply_to_preview',
-            'metadata', 'special_content', 'reactions', 'can_react'
+            'metadata', 'special_content', 'forward_info', 'reactions', 'can_react'
         ]
         read_only_fields = [
             'telegram_date', 'created_at', 'updated_at'
         ]
+
+    def to_representation(self, instance):
+        """Repair legacy edit/delete webhook records without rewriting history."""
+        data = super().to_representation(instance)
+        metadata = instance.metadata if isinstance(instance.metadata, dict) else {}
+        raw_type = metadata.get('raw_type')
+        if raw_type in {'editedMessage', 'deletedMessage'}:
+            from .services.message_content import normalize_green_message
+
+            provider_content = metadata.get('provider_content')
+            provider_content = provider_content if isinstance(provider_content, dict) else {}
+            normalized = normalize_green_message({**provider_content, 'typeMessage': raw_type})
+            data['message_type'] = normalized['message_type']
+            data['message_type_display'] = dict(Message.MessageType.choices).get(
+                normalized['message_type'], 'Сообщение'
+            )
+            data['text'] = normalized['text'] or data.get('text')
+            data['special_content'] = normalized['special_content']
+        return data
     
     def get_media_file_name(self, obj):
         """Return a user-facing original filename when it is known."""
@@ -160,6 +180,10 @@ class MessageSerializer(serializers.ModelSerializer):
     def get_special_content(self, obj):
         from .services.message_content import special_content_from_metadata
         return special_content_from_metadata(obj.message_type, obj.metadata)
+
+    def get_forward_info(self, obj):
+        from .services.message_content import forward_info_from_metadata
+        return forward_info_from_metadata(obj.metadata)
 
     def get_metadata(self, obj):
         """Expose only UI state; provider payloads can contain large thumbnails."""

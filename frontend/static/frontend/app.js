@@ -930,8 +930,9 @@ const renderMessages = (messages, forceScroll = false) => {
     const specialContent = renderSpecialMessage(msg.special_content);
     const showRegularText = Boolean(msg.text) && (!specialContent || msg.special_content?.kind === 'unsupported');
     let content = `${specialContent}${showRegularText ? `<div class="message__text">${escapeHtml(msg.text)}</div>` : ''}`;
-    if (!content) {
-      content = renderSpecialMessage({kind: 'unsupported', label: msg.message_type_display || 'Неподдерживаемый тип сообщения'});
+    const downloadableMediaTypes = ['photo', 'video', 'voice', 'audio', 'document', 'sticker'];
+    if (!content && !downloadableMediaTypes.includes(msg.message_type)) {
+      content = `<div class="message__text message__text--muted">Сообщение без текста</div>`;
     }
     if (msg.reply_to_preview) {
       content = `<div class="message__reply-preview">${escapeHtml(msg.reply_to_preview)}</div>` + content;
@@ -967,8 +968,15 @@ const renderMessages = (messages, forceScroll = false) => {
       } else {
         content = `<div class="message__media"><a href="${mediaUrl}" download="${escapeHtml(msg.media_file_name || '')}" class="message__media--document"><i class="material-icons" style="font-size:16px;">description</i> ${escapeHtml(msg.media_file_name || 'Файл')}</a></div>` + content;
       }
-    } else if (['photo', 'video', 'voice', 'audio', 'document', 'sticker'].includes(msg.message_type)) {
-      content = `<div class="message__media"><button class="media-download-button" onclick="downloadViaApi(${msg.id}, this)">Загрузить ${escapeHtml(msg.message_type_display || 'файл')}</button></div>` + content;
+    } else if (downloadableMediaTypes.includes(msg.message_type)) {
+      content = `<div class="message__media"><button class="media-download-button" onclick="downloadViaApi(${msg.id}, this)">Загрузить файл</button></div>` + content;
+    }
+
+    if (msg.forward_info?.is_forwarded) {
+      const forwardedLabel = msg.forward_info.from_name
+        ? `Переслано от ${escapeHtml(msg.forward_info.from_name)}`
+        : 'Переслано';
+      content = `<div class="message__forwarded"><i class="material-icons" aria-hidden="true">forward</i><span>${forwardedLabel}</span></div>` + content;
     }
 
     div.innerHTML = `
