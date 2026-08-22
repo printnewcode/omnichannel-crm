@@ -13,7 +13,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Count, OuterRef, Q, Subquery
 from django.db.models.fields.json import KeyTextTransform, KeyTransform
 from django.db.models.functions import Coalesce, Substr
@@ -385,9 +385,22 @@ class HealthCheckView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
-        """Простая проверка здоровья"""
+        """Return success only when Django and its database both respond."""
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT 1')
+                cursor.fetchone()
+        except Exception:
+            logger.exception('Database health check failed')
+            return Response({
+                'status': 'unhealthy',
+                'database': 'unavailable',
+                'timestamp': timezone.now().isoformat(),
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
         return Response({
             'status': 'healthy',
+            'database': 'healthy',
             'timestamp': timezone.now().isoformat()
         }, status=status.HTTP_200_OK)
 

@@ -1,0 +1,9 @@
+[Unit]
+Description=Omnichannel CRM watchdog
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /home/omnichannel-crm/deploy/watchdog.sh
+Nice=10

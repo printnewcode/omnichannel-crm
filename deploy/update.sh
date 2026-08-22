@@ -3,6 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Prevent the watchdog from restarting services while a new image is building.
+exec 9>/run/lock/omnichannel-watchdog.lock
+flock 9
+
 compose=(docker compose --env-file .env -f deploy/docker-compose.vps.yml)
 
 # Keep enough RAM available for BuildKit on small VPS instances. Only this

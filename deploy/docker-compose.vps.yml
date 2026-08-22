@@ -13,9 +13,9 @@ services:
       MYSQL_USER: ${DB_USER}
       MYSQL_PASSWORD: ${DB_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --innodb-buffer-pool-size=128M --max-connections=100 --performance-schema=OFF
-    mem_limit: 288m
-    cpus: "0.25"
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --innodb-buffer-pool-size=192M --innodb-buffer-pool-instances=1 --max-connections=60 --performance-schema=OFF
+    mem_limit: 384m
+    cpus: "0.35"
     pids_limit: 100
     logging: *default-logging
     volumes:
@@ -24,7 +24,7 @@ services:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 15s
       timeout: 15s
-      retries: 20
+      retries: 5
       start_period: 60s
 
   redis:
@@ -85,13 +85,26 @@ services:
       DB_PORT: "3306"
       REDIS_URL: redis://redis:6379/0
       RUN_TELETHON_CLIENTS: "0"
-    mem_limit: 192m
-    cpus: "0.25"
+    mem_limit: 256m
+    cpus: "0.30"
     pids_limit: 100
     logging: *default-logging
     command: daphne -b 0.0.0.0 -p 8000 CRM.asgi:application
     ports:
       - "127.0.0.1:8001:8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import http.client, os;
+          host=(os.environ.get('DOMAIN') or os.environ.get('ALLOWED_HOSTS','localhost').split(',')[0]).replace('https://','').replace('http://','').split('/')[0];
+          c=http.client.HTTPConnection('127.0.0.1',8000,timeout=8);
+          c.request('GET','/api/health/',headers={'Host':host,'X-Forwarded-Proto':'https'});
+          r=c.getresponse(); raise SystemExit(0 if r.status == 200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -113,8 +126,8 @@ services:
       DB_PORT: "3306"
       REDIS_URL: redis://redis:6379/0
       RUN_TELETHON_CLIENTS: "0"
-    mem_limit: 224m
-    cpus: "0.18"
+    mem_limit: 256m
+    cpus: "0.15"
     pids_limit: 100
     logging: *default-logging
     command: python manage.py start_telegram_accounts --reconcile-interval 900 --account-refresh-interval 60
@@ -138,7 +151,7 @@ services:
       DB_PORT: "3306"
       REDIS_URL: redis://redis:6379/0
       RUN_TELETHON_CLIENTS: "0"
-    mem_limit: 192m
+    mem_limit: 224m
     cpus: "0.10"
     pids_limit: 100
     logging: *default-logging
