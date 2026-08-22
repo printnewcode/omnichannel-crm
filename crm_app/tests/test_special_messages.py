@@ -187,6 +187,24 @@ class GreenSpecialMessageTests(TestCase):
         self.assertEqual(data['special_content']['kind'], 'unsupported')
         self.assertEqual(data['special_content']['label'], 'Неподдерживаемое сообщение')
 
+    def test_legacy_telegram_action_class_name_is_repaired(self):
+        message = Message.objects.create(
+            chat=self.chat, external_message_id='legacy-phone-call',
+            message_type=Message.MessageType.SERVICE,
+            telegram_date=timezone.now(),
+            metadata={
+                'special_content': {
+                    'kind': 'service',
+                    'label': 'MessageActionPhoneCall',
+                },
+            },
+        )
+
+        self.assertEqual(
+            MessageSerializer(message).data['special_content']['label'],
+            'Звонок',
+        )
+
     def test_legacy_edited_message_exposes_text_instead_of_provider_type(self):
         message = Message.objects.create(
             chat=self.chat, external_message_id='legacy-edit-event',
@@ -262,6 +280,27 @@ class GreenSpecialMessageTests(TestCase):
 
 
 class TelegramSpecialMessageTests(TestCase):
+    def test_phone_call_and_unknown_actions_never_expose_class_names(self):
+        PhoneCall = type('MessageActionPhoneCall', (), {})
+        phone_call = PhoneCall()
+        phone_call.video = False
+        phone_call.reason = type('PhoneCallDiscardReasonMissed', (), {})()
+        message = SimpleNamespace(
+            venue=None, geo=None, contact=None, poll=None, media=None,
+            action=phone_call,
+        )
+        self.assertEqual(
+            telegram_special_content(message)['label'],
+            'Звонок · пропущен',
+        )
+
+        FutureAction = type('MessageActionFutureTelegramFeature', (), {})
+        message.action = FutureAction()
+        self.assertEqual(
+            telegram_special_content(message)['label'],
+            'Системное сообщение',
+        )
+
     def test_telegram_forward_includes_origin_when_available(self):
         message = SimpleNamespace(
             forward=None,

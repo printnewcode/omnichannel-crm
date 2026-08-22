@@ -29,6 +29,99 @@ GREEN_MESSAGE_TYPES = {
 }
 
 
+TELEGRAM_ACTION_LABELS = {
+    'MessageActionEmpty': 'Системное сообщение',
+    'MessageActionChatCreate': 'Группа создана',
+    'MessageActionChatEditTitle': 'Название чата изменено',
+    'MessageActionChatEditPhoto': 'Фотография чата изменена',
+    'MessageActionChatDeletePhoto': 'Фотография чата удалена',
+    'MessageActionChatAddUser': 'Участник добавлен',
+    'MessageActionChatDeleteUser': 'Участник покинул чат',
+    'MessageActionChatJoinedByLink': 'Участник присоединился по ссылке',
+    'MessageActionChatJoinedByRequest': 'Заявка на вступление одобрена',
+    'MessageActionChannelCreate': 'Канал создан',
+    'MessageActionChatMigrateTo': 'Группа преобразована в супергруппу',
+    'MessageActionChannelMigrateFrom': 'История группы перенесена',
+    'MessageActionPinMessage': 'Сообщение закреплено',
+    'MessageActionHistoryClear': 'История сообщений очищена',
+    'MessageActionGameScore': 'Результат игры обновлён',
+    'MessageActionPaymentSentMe': 'Платёж получен',
+    'MessageActionPaymentSent': 'Платёж отправлен',
+    'MessageActionPaymentRefunded': 'Платёж возвращён',
+    'MessageActionPhoneCall': 'Звонок',
+    'MessageActionConferenceCall': 'Конференц-звонок',
+    'MessageActionCustomAction': 'Системное сообщение',
+    'MessageActionScreenshotTaken': 'Сделан снимок экрана',
+    'MessageActionBotAllowed': 'Боту разрешён доступ',
+    'MessageActionSecureValuesSentMe': 'Защищённые данные получены',
+    'MessageActionSecureValuesSent': 'Защищённые данные отправлены',
+    'MessageActionContactSignUp': 'Контакт зарегистрировался в Telegram',
+    'MessageActionGeoProximityReached': 'Участники находятся рядом',
+    'MessageActionGroupCall': 'Групповой звонок',
+    'MessageActionInviteToGroupCall': 'Приглашение в групповой звонок',
+    'MessageActionGroupCallScheduled': 'Групповой звонок запланирован',
+    'MessageActionSetMessagesTTL': 'Изменён срок хранения сообщений',
+    'MessageActionSetChatTheme': 'Тема чата изменена',
+    'MessageActionSetChatWallPaper': 'Фон чата изменён',
+    'MessageActionWebViewDataSentMe': 'Данные приложения получены',
+    'MessageActionWebViewDataSent': 'Данные приложения отправлены',
+    'MessageActionGiftPremium': 'Подарена подписка Telegram Premium',
+    'MessageActionGiftCode': 'Отправлен подарочный код',
+    'MessageActionGiftStars': 'Подарены звёзды Telegram',
+    'MessageActionGiftTon': 'Отправлен подарок TON',
+    'MessageActionPrizeStars': 'Получен приз в звёздах Telegram',
+    'MessageActionStarGift': 'Отправлен подарок',
+    'MessageActionStarGiftUnique': 'Отправлен уникальный подарок',
+    'MessageActionTopicCreate': 'Тема создана',
+    'MessageActionTopicEdit': 'Тема изменена',
+    'MessageActionSuggestProfilePhoto': 'Предложена фотография профиля',
+    'MessageActionSuggestBirthday': 'Предложено добавить дату рождения',
+    'MessageActionRequestedPeer': 'Контакт отправлен',
+    'MessageActionRequestedPeerSentMe': 'Контакт получен',
+    'MessageActionGiveawayLaunch': 'Розыгрыш начался',
+    'MessageActionGiveawayResults': 'Подведены итоги розыгрыша',
+    'MessageActionBoostApply': 'Применён буст',
+    'MessageActionPaidMessagesRefunded': 'Оплата сообщений возвращена',
+    'MessageActionPaidMessagesPrice': 'Стоимость сообщений изменена',
+    'MessageActionTodoCompletions': 'Задачи отмечены выполненными',
+    'MessageActionTodoAppendTasks': 'Добавлены новые задачи',
+    'MessageActionSuggestedPostApproval': 'Предложенная публикация одобрена',
+    'MessageActionSuggestedPostSuccess': 'Предложенная публикация размещена',
+    'MessageActionSuggestedPostRefund': 'Оплата публикации возвращена',
+    'MessageActionStarGiftPurchaseOffer': 'Получено предложение о покупке подарка',
+    'MessageActionStarGiftPurchaseOfferDeclined': 'Предложение о покупке отклонено',
+    'MessageActionNewCreatorPending': 'Ожидается новый владелец',
+    'MessageActionChangeCreator': 'Владелец чата изменён',
+    'MessageActionNoForwardsToggle': 'Настройки пересылки изменены',
+    'MessageActionNoForwardsRequest': 'Запрошено разрешение на пересылку',
+    'MessageActionPollAppendAnswer': 'В опрос добавлен вариант ответа',
+    'MessageActionPollDeleteAnswer': 'Из опроса удалён вариант ответа',
+    'MessageActionManagedBotCreated': 'Подключён управляющий бот',
+}
+
+
+def telegram_action_label(action: Any = None, class_name: str = '') -> str:
+    name = class_name or (action.__class__.__name__ if action is not None else '')
+    custom = str(getattr(action, 'message', '') or '').strip() if action is not None else ''
+    if custom:
+        return custom
+    label = TELEGRAM_ACTION_LABELS.get(name, 'Системное сообщение')
+    if name in {'MessageActionPhoneCall', 'MessageActionConferenceCall'} and action is not None:
+        if getattr(action, 'video', False):
+            label = 'Видеозвонок'
+        reason = getattr(action, 'reason', None)
+        reason_name = reason.__class__.__name__ if reason is not None else ''
+        reason_labels = {
+            'PhoneCallDiscardReasonMissed': 'пропущен',
+            'PhoneCallDiscardReasonBusy': 'отклонён',
+            'PhoneCallDiscardReasonDisconnect': 'соединение прервано',
+            'PhoneCallDiscardReasonHangup': 'завершён',
+        }
+        if reason_name in reason_labels:
+            label = f'{label} · {reason_labels[reason_name]}'
+    return label
+
+
 def _dict(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
@@ -259,7 +352,7 @@ def telegram_special_content(message: Any) -> dict | None:
         return {'kind': 'dice', 'emoji': str(getattr(media, 'emoticon', '') or '🎲'), 'value': getattr(media, 'value', None)}
     action = getattr(message, 'action', None)
     if action:
-        return {'kind': 'service', 'label': str(getattr(action, 'message', None) or action.__class__.__name__)}
+        return {'kind': 'service', 'label': telegram_action_label(action)}
     return None
 
 
@@ -268,6 +361,10 @@ def special_content_from_metadata(message_type: str, metadata: Any) -> dict | No
     source = _dict(metadata)
     special = source.get('special_content')
     if isinstance(special, dict) and special.get('kind'):
+        if special.get('kind') == 'service':
+            label = str(special.get('label') or '')
+            if label.startswith('MessageAction'):
+                return {**special, 'label': telegram_action_label(class_name=label)}
         return special
     raw_type = str(source.get('raw_type') or '')
     provider_content = _dict(source.get('provider_content'))

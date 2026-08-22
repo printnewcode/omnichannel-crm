@@ -743,6 +743,8 @@ window.onclick = (event) => {
 
 let renderedMessageIds = new Set();
 let lastDateString = null;
+const messageIdsToRerender = new Set();
+const activeMediaDownloads = new Set();
 
 const formatDateHeader = (date) => {
   const options = { month: 'long', day: 'numeric' };
@@ -822,7 +824,7 @@ const updateStickyDate = () => {
   }
 };
 
-const renderMessages = (messages, forceScroll = false) => {
+const renderMessages = (messages, forceScroll = false, preservePosition = false) => {
   const messageList = document.getElementById("message-list");
   if (!messageList) return;
 
@@ -840,6 +842,7 @@ const renderMessages = (messages, forceScroll = false) => {
   const anchor = !forceScroll
     ? Array.from(messageList.querySelectorAll('.message')).find((node) => node.offsetTop + node.offsetHeight >= messageList.scrollTop)
     : null;
+  const anchorId = anchor?.dataset.msgId;
   const anchorOffset = anchor ? anchor.offsetTop - messageList.scrollTop : 0;
 
   if (forceScroll) {
@@ -908,16 +911,22 @@ const renderMessages = (messages, forceScroll = false) => {
     if (renderedMessageIds.has(msg.id)) {
       const existing = messageList.querySelector(`.message[data-msg-id="${msg.id}"]`);
       if (existing) {
-        existing.hidden = false;
-        existing.dataset.messageDate = msg.telegram_date || existing.dataset.messageDate;
-        const icon = existing.querySelector('.status-icon');
-        if (icon) {
-          icon.textContent = getStatusIcon(msg);
-          icon.classList.toggle('status-icon--read', getStatusClass(msg).includes('status-icon--read'));
+        if (messageIdsToRerender.has(String(msg.id))) {
+          existing.remove();
+          renderedMessageIds.delete(msg.id);
+          messageIdsToRerender.delete(String(msg.id));
+        } else {
+          existing.hidden = false;
+          existing.dataset.messageDate = msg.telegram_date || existing.dataset.messageDate;
+          const icon = existing.querySelector('.status-icon');
+          if (icon) {
+            icon.textContent = getStatusIcon(msg);
+            icon.classList.toggle('status-icon--read', getStatusClass(msg).includes('status-icon--read'));
+          }
+          updateMessageReactions(existing, msg);
         }
-        updateMessageReactions(existing, msg);
       }
-      return;
+      if (renderedMessageIds.has(msg.id)) return;
     }
 
     const div = document.createElement("div");
@@ -1002,12 +1011,17 @@ const renderMessages = (messages, forceScroll = false) => {
   rebuildMessageTimeline(messageList);
   messageList.classList.remove('is-loading');
 
+  const currentAnchor = anchorId
+    ? messageList.querySelector(`.message[data-msg-id="${anchorId}"]`)
+    : null;
   if (forceScroll) {
     messageList.scrollTop = messageList.scrollHeight;
+  } else if (preservePosition && currentAnchor) {
+    messageList.scrollTop = currentAnchor.offsetTop - anchorOffset;
+  } else if (!isAtBottom && currentAnchor) {
+    messageList.scrollTop = currentAnchor.offsetTop - anchorOffset;
   } else if (isAtBottom) {
     messageList.scrollTo({top: messageList.scrollHeight, behavior: 'smooth'});
-  } else if (anchor?.isConnected) {
-    messageList.scrollTop = anchor.offsetTop - anchorOffset;
   }
 };
 
@@ -1019,6 +1033,10 @@ const removePendingDelivery = (deliveryId) => {
   renderedMessageIds.delete(syntheticId);
 };
 window.downloadViaApi = async (msgId, button) => {
+  const downloadKey = String(msgId);
+  if (activeMediaDownloads.has(downloadKey)) return;
+  activeMediaDownloads.add(downloadKey);
+  setStatus(`Загружаем файлы: ${activeMediaDownloads.size}`);
   const originalLabel = button?.textContent;
   try {
     if (button) {
@@ -1043,7 +1061,8 @@ window.downloadViaApi = async (msgId, button) => {
     if (!completed) {
       throw new Error('Telegram всё ещё готовит файл. Попробуйте открыть его немного позже.');
     }
-    await window.fetchMessagesGlobal?.(true);
+    messageIdsToRerender.add(downloadKey);
+    await window.fetchMessagesGlobal?.(false, {preservePosition: true});
     setStatus('Файл загружен');
   } catch (error) {
     setError(error.message || 'Не удалось загрузить файл.');
@@ -1052,8 +1071,12 @@ window.downloadViaApi = async (msgId, button) => {
       button.disabled = false;
       button.textContent = originalLabel;
     }
+  } finally {
+    activeMediaDownloads.delete(downloadKey);
+    setStatus(activeMediaDownloads.size ? `Загружаем файлы: ${activeMediaDownloads.size}` : '');
   }
-};const setActiveChat = (chat) => {
+};
+const setActiveChat = (chat) => {
   const accountType = getAccountType(chat);
   const active = document.getElementById("active-chat");
   if (active) active.textContent = chat ? getChatName(chat) : "Выберите диалог";
@@ -1374,9 +1397,9 @@ document.addEventListener("DOMContentLoaded", () => {
     } finally {
       setStatus("Online");
     }
-  };
+};
 
-  const fetchMessages = async (forceScroll = false) => {
+  const fetchMessages = async (forceScroll = false, options = {}) => {
     if (!currentChatId) return;
     if (messageFetchController) messageFetchController.abort();
     const controller = new AbortController();
@@ -1396,7 +1419,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const snapshot = msgs.map(m => `${m.id}-${m.status}-${m.updated_at}-${(m.text || '').length}-${m.media_file_path || ''}-${JSON.stringify(m.reactions || [])}`).join('|') + `[search:${messageSearchQuery}]`;
 
       if (snapshot !== lastContentSnapshot || forceScroll) {
-        renderMessages(msgs, forceScroll);
+        renderMessages(msgs, forceScroll, Boolean(options.preservePosition));
         lastContentSnapshot = snapshot;
       }
     } catch (e) {
