@@ -789,6 +789,13 @@ body {
   font-size: 13px;
 }
 .media-download-button:disabled { cursor: wait; opacity: .7; }
+.message--outgoing .media-download-button {
+  color: var(--accent);
+  background: rgba(255, 255, 255, .96);
+  border: 1px solid rgba(255, 255, 255, .72);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .16);
+}
+.message--outgoing .media-download-button:hover { background: #fff; }
 /* Upload Preview */
 .upload-preview {
   background: var(--bg-color);
@@ -1483,28 +1490,38 @@ body, .sidebar, .main-chat, .chat-header, .chat-input-area, .search-bar,
 
 .message-reply-button, .message-reaction-button {
   position: absolute;
-  top: 5px;
-  right: 5px;
+  z-index: 6;
+  top: auto;
+  right: 6px;
+  bottom: -12px;
   width: 28px;
   height: 28px;
-  border: 0;
-  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+  border-radius: 50%;
   display: grid;
   place-items: center;
   color: var(--text-secondary);
-  background: color-mix(in srgb, var(--bg-color) 82%, transparent);
+  background: var(--surface-raised);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .2);
   cursor: pointer;
   opacity: 0;
-  transform: translateY(2px);
-  transition: opacity .14s, transform .14s, color .14s;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-3px) scale(.94);
+  transition: opacity .14s, transform .14s, visibility .14s, color .14s, background .14s;
 }
-.message-reaction-button { right: 36px; }
+.message-reaction-button { right: 38px; }
 .message-reply-button .material-icons, .message-reaction-button .material-icons { font-size: 17px; }
 .message:hover .message-reply-button, .message-reply-button:focus-visible,
-.message:hover .message-reaction-button, .message-reaction-button:focus-visible { opacity: 1; transform: none; }
-.message-reply-button:hover, .message-reaction-button:hover { color: var(--accent); }
+.message:hover .message-reaction-button, .message-reaction-button:focus-visible,
+.message:focus-within .message-reply-button, .message:focus-within .message-reaction-button {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: none;
+}
+.message-reply-button:hover, .message-reaction-button:hover { color: var(--accent); background: var(--accent-soft); }
 .message { position: relative; }
-.message:has(.message-reaction-button) { padding-right: 68px; }
 
 .message-reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
 .message-reactions[hidden], .reaction-picker[hidden] { display: none; }
@@ -1516,7 +1533,7 @@ body, .sidebar, .main-chat, .chat-header, .chat-input-area, .search-bar,
 button.message-reaction { cursor: pointer; }
 .message-reaction.chosen { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .reaction-picker {
-  position: absolute; z-index: 15; top: 37px; right: 5px; display: flex; gap: 2px;
+  position: absolute; z-index: 15; top: auto; right: 34px; bottom: 22px; display: flex; gap: 2px;
   padding: 6px; border: 1px solid var(--border-color); border-radius: 13px;
   background: var(--surface-raised); box-shadow: 0 10px 32px rgba(0,0,0,.28);
 }
