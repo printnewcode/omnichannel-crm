@@ -1026,9 +1026,23 @@ window.downloadViaApi = async (msgId, button) => {
       button.textContent = 'Загрузка…';
     }
     setStatus('Загружаем файл…');
-    const response = await fetch(`${apiBase}/messages/${msgId}/download_media/`);
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    let completed = false;
+    for (let attempt = 0; attempt < 95; attempt += 1) {
+      const suffix = attempt ? '?poll=1' : '';
+      const response = await fetch(`${apiBase}/messages/${msgId}/download_media/${suffix}`);
+      const data = await response.json().catch(() => ({}));
+      if (response.status === 202) {
+        if (button) button.textContent = 'Загружаем в фоне…';
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        continue;
+      }
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      completed = true;
+      break;
+    }
+    if (!completed) {
+      throw new Error('Telegram всё ещё готовит файл. Попробуйте открыть его немного позже.');
+    }
     await window.fetchMessagesGlobal?.(true);
     setStatus('Файл загружен');
   } catch (error) {

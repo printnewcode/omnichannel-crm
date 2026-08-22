@@ -3,6 +3,7 @@
 Обрабатывает динамическое создание, запуск и остановку клиентов
 """
 import asyncio
+import concurrent.futures
 import logging
 import os
 import threading
@@ -65,6 +66,7 @@ class TelegramClientManager:
         if not hasattr(self, '_initialized'):
             self._initialized = True
             self._lock = asyncio.Lock()
+            self._media_download_locks = {}
     
     async def _get_or_create_loop(self) -> asyncio.AbstractEventLoop:
         """Получить или создать event loop"""
@@ -521,6 +523,7 @@ class TelegramClientManager:
                     chat_type = 'channel'
                 else:
                     chat_type = 'unknown'
+                peer_metadata = self._telegram_peer_metadata(chat_entity)
 
                 # Получение или создание чата
                 @database_sync_to_async
@@ -534,7 +537,7 @@ class TelegramClientManager:
                             'username': getattr(chat_entity, 'username', None),
                             'first_name': getattr(chat_entity, 'first_name', None),
                             'last_name': getattr(chat_entity, 'last_name', None),
-                            'metadata': {},
+                            'metadata': peer_metadata,
                             'is_bot': chat_type == 'private' and bool(getattr(chat_entity, 'bot', False)),
                         }
                     )
@@ -550,6 +553,9 @@ class TelegramClientManager:
                     peer_is_bot = chat_type == 'private' and bool(getattr(chat_entity, 'bot', False))
                     if chat.is_bot != peer_is_bot:
                         chat.is_bot = peer_is_bot
+                        updated = True
+                    if peer_metadata and not (chat.metadata or {}).get('telegram_peer'):
+                        chat.metadata = {**(chat.metadata or {}), **peer_metadata}
                         updated = True
 
                     if updated or created:
@@ -782,21 +788,22 @@ class TelegramClientManager:
             logger.exception(f"Error getting file_id: {e}")
         return None
 
-    def download_media_by_message_id_sync(self, message) -> Optional[str]:
+    def download_media_by_message_id_sync(self, message, timeout: int = 180) -> Optional[str]:
         """Sync версия для скачивания медиа по message.telegram_id"""
-        import concurrent.futures
-
         # Pass only the primary key across the sync/async boundary. The object
         # returned by the API queryset contains deferred fields; touching one
         # from the Telethon loop would make Django perform synchronous ORM I/O
         # in an async context.
         message_id = message.pk
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(self._download_in_background, message_id)
-            try:
-                return future.result(timeout=30)
-            except concurrent.futures.TimeoutError:
-                raise Exception("Download timeout")
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self._download_with_fresh_client(message_id), loop,
+        )
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TimeoutError('Telegram не успел подготовить файл. Попробуйте ещё раз позже.')
 
     def _download_in_background(self, message_id: int) -> Optional[str]:
         """Выполнить скачивание в фоне"""
@@ -819,6 +826,10 @@ class TelegramClientManager:
             'message_type': message.message_type,
             'metadata': dict(message.metadata or {}),
             'chat_telegram_id': message.chat.telegram_id,
+            'chat_id': message.chat.id,
+            'chat_type': message.chat.chat_type,
+            'chat_username': message.chat.username or '',
+            'chat_metadata': dict(message.chat.metadata or {}),
             'account_id': account.id,
             'session_string': account.session_string or '',
             'api_id': account.api_id,
@@ -835,6 +846,58 @@ class TelegramClientManager:
             updated_at=timezone.now(),
         )
 
+    @staticmethod
+    def _telegram_peer_metadata(entity) -> dict:
+        access_hash = getattr(entity, 'access_hash', None)
+        if access_hash is None:
+            return {}
+        if isinstance(entity, types.User):
+            peer_type = 'user'
+        elif isinstance(entity, types.Channel):
+            peer_type = 'channel'
+        else:
+            return {}
+        return {'telegram_peer': {'type': peer_type, 'access_hash': str(access_hash)}}
+
+    @staticmethod
+    def _store_telegram_peer(chat_id: int, peer_metadata: dict) -> None:
+        from ..models import Chat
+
+        if not peer_metadata:
+            return
+        chat = Chat.objects.only('id', 'metadata').get(pk=chat_id)
+        metadata = dict(chat.metadata or {})
+        metadata.update(peer_metadata)
+        Chat.objects.filter(pk=chat_id).update(metadata=metadata)
+
+    async def _resolve_download_peer(self, client, context: dict):
+        peer = context['chat_metadata'].get('telegram_peer') or {}
+        access_hash = peer.get('access_hash')
+        if access_hash not in (None, ''):
+            if peer.get('type') == 'channel':
+                return types.InputPeerChannel(context['chat_telegram_id'], int(access_hash))
+            return types.InputPeerUser(context['chat_telegram_id'], int(access_hash))
+        if context['chat_type'] == 'group':
+            return types.InputPeerChat(context['chat_telegram_id'])
+        if context['chat_username']:
+            entity = await client.get_entity(context['chat_username'])
+        else:
+            entity = None
+            # Existing records may predate persisted access hashes. Scan only
+            # until the requested peer is found, then cache the hash in the DB.
+            async for dialog in client.iter_dialogs():
+                if getattr(dialog.entity, 'id', None) == context['chat_telegram_id']:
+                    entity = dialog.entity
+                    break
+            if entity is None:
+                raise LookupError('Диалог не найден в подключённом Telegram-аккаунте.')
+        peer_metadata = self._telegram_peer_metadata(entity)
+        if peer_metadata:
+            await database_sync_to_async(self._store_telegram_peer)(
+                context['chat_id'], peer_metadata,
+            )
+        return entity
+
     async def _download_with_fresh_client(self, message_or_id) -> Optional[str]:
         """Скачать медиа используя новый клиент"""
         from telethon.sessions import StringSession
@@ -842,23 +905,22 @@ class TelegramClientManager:
         message_id = getattr(message_or_id, 'pk', message_or_id)
         context = await database_sync_to_async(self._telegram_download_context)(message_id)
 
+        lock = self._media_download_locks.setdefault(context['account_id'], asyncio.Lock())
+        await lock.acquire()
         client = self._create_client(
             StringSession(context['session_string']),
             context['api_id'],
             context['api_hash'],
         )
-        await client.connect()
 
         try:
+            await client.connect()
             logger.info(
                 'Downloading media for message %s (telegram_id: %s) in chat %s',
                 context['message_id'], context['telegram_message_id'], context['chat_telegram_id'],
             )
 
-            # A fresh StringSession has no in-memory entity cache. Loading dialogs
-            # restores the access hashes required for private users.
-            await client.get_dialogs(limit=None)
-            chat_entity = await client.get_entity(context['chat_telegram_id'])
+            chat_entity = await self._resolve_download_peer(client, context)
             telegram_message = await client.get_messages(chat_entity, ids=[context['telegram_message_id']])
 
             if not telegram_message or not telegram_message[0]:
@@ -895,7 +957,10 @@ class TelegramClientManager:
             return relative_path
 
         finally:
-            await client.disconnect()
+            try:
+                await client.disconnect()
+            finally:
+                lock.release()
 
     async def download_media_by_message_id(self, message) -> Optional[str]:
         """Скачать медиа по message.telegram_id для ленивой загрузки"""
@@ -1949,6 +2014,7 @@ class TelegramClientManager:
                 try:
                     chat_entity = dialog.entity
                     chat_id = chat_entity.id
+                    peer_metadata = self._telegram_peer_metadata(chat_entity)
                     safe_title = dialog.title.encode('ascii', 'replace').decode('ascii') if dialog.title else "Unknown"
                     logger.debug(f"Processing dialog: {safe_title} (ID: {chat_id})")
                     
@@ -1965,6 +2031,7 @@ class TelegramClientManager:
                                     'title': dialog.title or "Unknown",
                                     'username': username,
                                     'is_bot': bool(dialog.is_user and getattr(chat_entity, 'bot', False)),
+                                    'metadata': peer_metadata,
                                 }
                             )
                             # Update title and peer kind if changed.
@@ -1976,6 +2043,9 @@ class TelegramClientManager:
                             if chat_obj.is_bot != peer_is_bot:
                                 chat_obj.is_bot = peer_is_bot
                                 update_fields.append('is_bot')
+                            if peer_metadata and not (chat_obj.metadata or {}).get('telegram_peer'):
+                                chat_obj.metadata = {**(chat_obj.metadata or {}), **peer_metadata}
+                                update_fields.append('metadata')
                             if update_fields:
                                 chat_obj.save(update_fields=[*update_fields, 'updated_at'])
                                 

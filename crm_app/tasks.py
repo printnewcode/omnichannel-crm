@@ -16,6 +16,44 @@ from .services.realtime import publish_message
 logger = logging.getLogger(__name__)
 
 
+def _set_media_download_state(message_id: int, state: str, error: str = ''):
+    try:
+        message = Message.objects.only('id', 'metadata').get(pk=message_id)
+    except Message.DoesNotExist:
+        return
+    metadata = dict(message.metadata or {})
+    metadata['media_download'] = {
+        'status': state,
+        'error': error[:1000],
+        'updated_at': timezone.now().isoformat(),
+    }
+    Message.objects.filter(pk=message_id).update(metadata=metadata)
+
+
+@shared_task(bind=True, max_retries=0, soft_time_limit=180, time_limit=210)
+def download_telegram_media_task(self, message_id: int):
+    """Download old Telegram media without blocking the Daphne web process."""
+    from .services.telegram_client_manager import TelegramClientManager
+
+    _set_media_download_state(message_id, 'downloading')
+    try:
+        message = Message.objects.select_related('chat__telegram_account').get(pk=message_id)
+        account = message.chat.telegram_account
+        if account.account_type != TelegramAccount.AccountType.PERSONAL:
+            raise ValueError('Фоновая загрузка доступна только для личного Telegram-аккаунта.')
+        result = TelegramClientManager().download_media_by_message_id_sync(message, timeout=175)
+        if not result:
+            raise RuntimeError('Telegram не вернул файл.')
+        _set_media_download_state(message_id, 'ready')
+        publish_message(message_id)
+        return result
+    except Exception as exc:
+        logger.exception('Could not download Telegram media for message %s', message_id)
+        _set_media_download_state(message_id, 'failed', str(exc))
+        publish_message(message_id)
+        return None
+
+
 @shared_task(bind=True, max_retries=3)
 def process_incoming_message(
     self,

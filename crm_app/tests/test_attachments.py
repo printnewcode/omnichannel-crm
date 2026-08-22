@@ -12,6 +12,7 @@ from django.utils import timezone
 
 from crm_app.models import Chat, Message, OutboundDelivery, TelegramAccount
 from crm_app.services.telegram_client_manager import TelegramClientManager
+from crm_app.tasks import download_telegram_media_task
 
 
 class AttachmentApiTests(TestCase):
@@ -99,7 +100,8 @@ class AttachmentApiTests(TestCase):
         self.assertEqual(text_response.status_code, 200)
         self.assertEqual([item['telegram_id'] for item in text_response.json()['results']], [201])
         self.assertEqual([item['telegram_id'] for item in caption_response.json()['results']], [202])
-    def test_download_error_is_specific(self):
+    @patch('crm_app.views.download_telegram_media_task.delay')
+    def test_telegram_download_is_queued_without_blocking_web(self, delay):
         message = Message.objects.create(
             chat=self.chat,
             telegram_id=123,
@@ -107,17 +109,44 @@ class AttachmentApiTests(TestCase):
             status=Message.MessageStatus.RECEIVED,
             telegram_date=timezone.now(),
         )
-        with patch.object(
-            TelegramClientManager,
-            'download_media_by_message_id_sync',
-            side_effect=RuntimeError('Telegram media expired'),
-        ):
-            response = self.client.get(
-                reverse('message-download-media', kwargs={'pk': message.pk})
-            )
+        response = self.client.get(
+            reverse('message-download-media', kwargs={'pk': message.pk})
+        )
 
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()['status'], 'queued')
+        delay.assert_called_once_with(message.pk)
+
+        second = self.client.get(
+            reverse('message-download-media', kwargs={'pk': message.pk}),
+            {'poll': '1'},
+        )
+        self.assertEqual(second.status_code, 202)
+        delay.assert_called_once_with(message.pk)
+
+    @patch.object(
+        TelegramClientManager,
+        'download_media_by_message_id_sync',
+        side_effect=RuntimeError('Telegram media expired'),
+    )
+    def test_background_download_exposes_provider_error(self, _download):
+        message = Message.objects.create(
+            chat=self.chat, telegram_id=124,
+            message_type=Message.MessageType.PHOTO,
+            status=Message.MessageStatus.RECEIVED,
+            telegram_date=timezone.now(),
+        )
+
+        download_telegram_media_task.run(message.pk)
+        message.refresh_from_db()
+
+        self.assertEqual(message.metadata['media_download']['status'], 'failed')
+        self.assertIn('Telegram media expired', message.metadata['media_download']['error'])
+        response = self.client.get(
+            reverse('message-download-media', kwargs={'pk': message.pk}),
+            {'poll': '1'},
+        )
         self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()['code'], 'provider_download_failed')
         self.assertIn('Telegram media expired', response.json()['error'])
 
 
@@ -176,6 +205,7 @@ class TelegramIncomingMediaTests(TransactionTestCase):
                 telegram_id=99903,
                 telegram_account=account,
                 chat_type=Chat.ChatType.PRIVATE,
+                metadata={'telegram_peer': {'type': 'user', 'access_hash': '123456'}},
             )
             record = Message.objects.create(
                 chat=chat,

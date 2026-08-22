@@ -6,6 +6,7 @@ import errno
 import logging
 import os
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from rest_framework import viewsets, status, permissions
@@ -34,7 +35,7 @@ from .serializers import (
 from .services.telegram_client_manager import TelegramClientManager
 from .services.message_router import MessageRouter
 from .services.health_monitor import HealthMonitor
-from .tasks import process_incoming_message
+from .tasks import download_telegram_media_task, process_incoming_message
 
 logger = logging.getLogger(__name__)
 
@@ -728,6 +729,56 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
             if account.account_type in {TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX}:
                 from .services.provider_media import download_green_api_media
                 media_path = download_green_api_media(message)
+            elif account.account_type == TelegramAccount.AccountType.PERSONAL:
+                with transaction.atomic():
+                    locked = Message.objects.select_for_update().get(pk=message.pk)
+                    metadata = dict(locked.metadata or {})
+                    download_state = metadata.get('media_download') or {}
+                    state = download_state.get('status')
+                    updated_at = download_state.get('updated_at')
+                    recent = False
+                    if updated_at:
+                        try:
+                            state_time = datetime.fromisoformat(updated_at)
+                            if timezone.is_naive(state_time):
+                                state_time = timezone.make_aware(state_time)
+                            recent = (timezone.now() - state_time).total_seconds() < 600
+                        except (TypeError, ValueError):
+                            pass
+                    if state in {'queued', 'downloading'} and recent:
+                        return Response({'status': state}, status=status.HTTP_202_ACCEPTED)
+                    if state == 'failed' and request.query_params.get('poll') == '1':
+                        return Response(
+                            {
+                                'error': download_state.get('error') or 'Не удалось скачать файл из Telegram.',
+                                'code': 'provider_download_failed',
+                            },
+                            status=status.HTTP_502_BAD_GATEWAY,
+                        )
+                    metadata['media_download'] = {
+                        'status': 'queued',
+                        'error': '',
+                        'updated_at': timezone.now().isoformat(),
+                    }
+                    locked.metadata = metadata
+                    locked.save(update_fields=['metadata', 'updated_at'])
+                try:
+                    download_telegram_media_task.delay(message.pk)
+                except Exception as exc:
+                    logger.exception('Could not queue Telegram media download for message %s', message.pk)
+                    failed = Message.objects.only('id', 'metadata').get(pk=message.pk)
+                    failed_metadata = dict(failed.metadata or {})
+                    failed_metadata['media_download'] = {
+                        'status': 'failed',
+                        'error': str(exc)[:1000],
+                        'updated_at': timezone.now().isoformat(),
+                    }
+                    Message.objects.filter(pk=message.pk).update(metadata=failed_metadata)
+                    return Response(
+                        {'error': f'Не удалось поставить загрузку в очередь: {exc}', 'code': 'queue_unavailable'},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    )
+                return Response({'status': 'queued'}, status=status.HTTP_202_ACCEPTED)
             else:
                 media_path = TelegramClientManager().download_media_by_message_id_sync(message)
             if media_path:
