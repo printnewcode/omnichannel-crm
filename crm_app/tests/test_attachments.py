@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
+from telethon import types
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, TransactionTestCase, override_settings
@@ -11,6 +12,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from crm_app.models import Chat, Message, OutboundDelivery, TelegramAccount
+from crm_app.serializers import MessageSerializer
 from crm_app.services.telegram_client_manager import TelegramClientManager
 from crm_app.tasks import download_telegram_media_task
 
@@ -116,6 +118,13 @@ class AttachmentApiTests(TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()['status'], 'queued')
         delay.assert_called_once_with(message.pk)
+        message.refresh_from_db()
+        self.assertEqual(
+            MessageSerializer(message).data['metadata']['media_download']['status'],
+            'queued',
+        )
+        detail = self.client.get(reverse('message-detail', kwargs={'pk': message.pk}))
+        self.assertEqual(detail.json()['metadata']['media_download']['status'], 'queued')
 
         second = self.client.get(
             reverse('message-download-media', kwargs={'pk': message.pk}),
@@ -151,6 +160,39 @@ class AttachmentApiTests(TestCase):
 
 
 class TelegramIncomingMediaTests(TransactionTestCase):
+    def test_private_peer_is_resolved_without_scanning_all_dialogs(self):
+        account = TelegramAccount.objects.create(
+            name='Fast peer account',
+            account_type=TelegramAccount.AccountType.PERSONAL,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+        )
+        chat = Chat.objects.create(
+            telegram_id=99904,
+            telegram_account=account,
+            chat_type=Chat.ChatType.PRIVATE,
+        )
+
+        class FakeClient:
+            async def get_input_entity(self, peer):
+                self.assert_peer = peer
+                return types.InputPeerUser(99904, 777888)
+
+            async def iter_dialogs(self):
+                raise AssertionError('Full dialog scan must not run')
+                yield
+
+        peer = async_to_sync(TelegramClientManager()._resolve_download_peer)(
+            FakeClient(),
+            {
+                'chat_metadata': {}, 'chat_type': Chat.ChatType.PRIVATE,
+                'chat_username': '', 'chat_telegram_id': 99904, 'chat_id': chat.id,
+            },
+        )
+
+        chat.refresh_from_db()
+        self.assertIsInstance(peer, types.InputPeerUser)
+        self.assertEqual(chat.metadata['telegram_peer']['access_hash'], '777888')
+
     def test_connected_client_download_preserves_filename(self):
         with tempfile.TemporaryDirectory() as temp_media:
             account = TelegramAccount.objects.create(

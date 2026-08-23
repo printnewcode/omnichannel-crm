@@ -187,16 +187,18 @@ class MessageSerializer(serializers.ModelSerializer):
 
     def get_metadata(self, obj):
         """Expose only UI state; provider payloads can contain large thumbnails."""
+        source = obj.metadata if isinstance(obj.metadata, dict) else {}
         if hasattr(obj, 'api_provider_status'):
             values = {
                 'provider_status': obj.api_provider_status,
                 'delivery_id': str(obj.api_delivery_id) if obj.api_delivery_id not in (None, '') else None,
+                'media_download': source.get('media_download'),
             }
         else:
-            source = obj.metadata if isinstance(obj.metadata, dict) else {}
             values = {
                 'provider_status': source.get('provider_status'),
                 'delivery_id': source.get('delivery_id'),
+                'media_download': source.get('media_download'),
             }
         return {key: value for key, value in values.items() if value not in (None, '')}
 

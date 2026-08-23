@@ -746,6 +746,28 @@ let lastDateString = null;
 const messageIdsToRerender = new Set();
 const activeMediaDownloads = new Set();
 
+const mediaDownloadState = (msg) => {
+  const state = msg?.metadata?.media_download || {};
+  const updatedAt = Date.parse(state.updated_at || '');
+  const recent = Number.isFinite(updatedAt) && Date.now() - updatedAt < 240000;
+  return {
+    status: state.status || '',
+    active: ['queued', 'downloading'].includes(state.status) && recent,
+    failed: state.status === 'failed' || (['queued', 'downloading'].includes(state.status) && !recent),
+  };
+};
+
+const messageContentVersion = (msg) => JSON.stringify([
+  msg.message_type,
+  msg.text || '',
+  msg.media_caption || '',
+  msg.media_file_path || '',
+  msg.reply_to_preview || '',
+  msg.special_content || null,
+  msg.forward_info || null,
+  msg?.metadata?.media_download || null,
+]);
+
 const formatDateHeader = (date) => {
   const options = { month: 'long', day: 'numeric' };
   const today = new Date();
@@ -891,6 +913,7 @@ const renderMessages = (messages, forceScroll = false, preservePosition = false)
   const sorted = filtered.sort((a, b) => new Date(a.telegram_date) - new Date(b.telegram_date));
 
   sorted.forEach((msg) => {
+    const contentVersion = messageContentVersion(msg);
     // Adopt the optimistic card in place. This prevents a remove/append jump when
     // the provider assigns the real message id or changes delivery status.
     const deliveryId = msg?.metadata?.delivery_id;
@@ -911,7 +934,10 @@ const renderMessages = (messages, forceScroll = false, preservePosition = false)
     if (renderedMessageIds.has(msg.id)) {
       const existing = messageList.querySelector(`.message[data-msg-id="${msg.id}"]`);
       if (existing) {
-        if (messageIdsToRerender.has(String(msg.id))) {
+        if (
+          messageIdsToRerender.has(String(msg.id))
+          || existing.dataset.contentVersion !== contentVersion
+        ) {
           existing.remove();
           renderedMessageIds.delete(msg.id);
           messageIdsToRerender.delete(String(msg.id));
@@ -935,6 +961,7 @@ const renderMessages = (messages, forceScroll = false, preservePosition = false)
     div.className = `message ${msg.is_outgoing ? "message--outgoing" : "message--incoming"} ${msg.message_type === 'sticker' ? 'message--sticker' : ''} ${animateClass}`;
     div.dataset.msgId = msg.id;
     div.dataset.messageDate = msg.telegram_date || new Date().toISOString();
+    div.dataset.contentVersion = contentVersion;
 
     const specialContent = renderSpecialMessage(msg.special_content);
     const showRegularText = Boolean(msg.text) && (!specialContent || msg.special_content?.kind === 'unsupported');
@@ -978,7 +1005,13 @@ const renderMessages = (messages, forceScroll = false, preservePosition = false)
         content = `<div class="message__media"><a href="${mediaUrl}" download="${escapeHtml(msg.media_file_name || '')}" class="message__media--document"><i class="material-icons" style="font-size:16px;">description</i> ${escapeHtml(msg.media_file_name || 'Файл')}</a></div>` + content;
       }
     } else if (downloadableMediaTypes.includes(msg.message_type)) {
-      content = `<div class="message__media"><button class="media-download-button" onclick="downloadViaApi(${msg.id}, this)">Загрузить файл</button></div>` + content;
+      const download = mediaDownloadState(msg);
+      if (download.active) {
+        content = `<div class="message__media"><button class="media-download-button media-download-button--loading" type="button" disabled><i class="material-icons spin">sync</i><span>Файл загружается…</span></button></div>` + content;
+      } else {
+        const label = download.failed ? 'Повторить загрузку' : 'Загрузить файл';
+        content = `<div class="message__media"><button class="media-download-button" type="button" onclick="downloadViaApi(${msg.id}, this)">${label}</button></div>` + content;
+      }
     }
 
     if (msg.forward_info?.is_forwarded) {
@@ -1045,13 +1078,13 @@ window.downloadViaApi = async (msgId, button) => {
     }
     setStatus('Загружаем файл…');
     let completed = false;
-    for (let attempt = 0; attempt < 95; attempt += 1) {
+    for (let attempt = 0; attempt < 48; attempt += 1) {
       const suffix = attempt ? '?poll=1' : '';
       const response = await fetch(`${apiBase}/messages/${msgId}/download_media/${suffix}`);
       const data = await response.json().catch(() => ({}));
       if (response.status === 202) {
         if (button) button.textContent = 'Загружаем в фоне…';
-        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        await new Promise((resolve) => window.setTimeout(resolve, 4000));
         continue;
       }
       if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);

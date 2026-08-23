@@ -742,7 +742,7 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
                             state_time = datetime.fromisoformat(updated_at)
                             if timezone.is_naive(state_time):
                                 state_time = timezone.make_aware(state_time)
-                            recent = (timezone.now() - state_time).total_seconds() < 600
+                            recent = (timezone.now() - state_time).total_seconds() < 240
                         except (TypeError, ValueError):
                             pass
                     if state in {'queued', 'downloading'} and recent:

@@ -851,9 +851,9 @@ class TelegramClientManager:
         access_hash = getattr(entity, 'access_hash', None)
         if access_hash is None:
             return {}
-        if isinstance(entity, types.User):
+        if isinstance(entity, (types.User, types.InputPeerUser)):
             peer_type = 'user'
-        elif isinstance(entity, types.Channel):
+        elif isinstance(entity, (types.Channel, types.InputPeerChannel)):
             peer_type = 'channel'
         else:
             return {}
@@ -883,12 +883,22 @@ class TelegramClientManager:
             entity = await client.get_entity(context['chat_username'])
         else:
             entity = None
+            # Telegram can resolve contacts and users who have messaged the
+            # account using access_hash=0. This avoids walking thousands of
+            # dialogs for the common private-chat case.
+            try:
+                entity = await client.get_input_entity(
+                    types.PeerUser(context['chat_telegram_id'])
+                )
+            except (ValueError, RPCError):
+                entity = None
             # Existing records may predate persisted access hashes. Scan only
             # until the requested peer is found, then cache the hash in the DB.
-            async for dialog in client.iter_dialogs():
-                if getattr(dialog.entity, 'id', None) == context['chat_telegram_id']:
-                    entity = dialog.entity
-                    break
+            if entity is None:
+                async for dialog in client.iter_dialogs():
+                    if getattr(dialog.entity, 'id', None) == context['chat_telegram_id']:
+                        entity = dialog.entity
+                        break
             if entity is None:
                 raise LookupError('Диалог не найден в подключённом Telegram-аккаунте.')
         peer_metadata = self._telegram_peer_metadata(entity)
