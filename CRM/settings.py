@@ -219,6 +219,17 @@ CELERY_RESULT_EXPIRES = 3600
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
+VSEGPT_API_KEY = config('VSEGPT_API_KEY', default='').strip()
+GOOGLE_CLIENT_ID = config('GOOGLE_CLIENT_ID', default='').strip()
+GOOGLE_CLIENT_SECRET = config('GOOGLE_CLIENT_SECRET', default='').strip()
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache' if REDIS_URL else 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': REDIS_URL if REDIS_URL else 'omnichannel-local-cache',
+    },
+}
+
 
 # CORS settings
 # https://pypi.org/project/django-cors-headers/

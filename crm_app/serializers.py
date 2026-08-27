@@ -2,8 +2,10 @@
 Django REST Framework Serializers
 """
 from rest_framework import serializers
+from django.utils import timezone
 from .models import (
-    TelegramAccount, Chat, Message, Operator, ChatAssignment, HistoryImportJob
+    TelegramAccount, Chat, Message, Operator, ChatAssignment, HistoryImportJob,
+    AISettings,
 )
 
 
@@ -57,6 +59,13 @@ class ChatSerializer(serializers.ModelSerializer):
     telegram_account = ChatAccountSerializer(read_only=True)
     last_message_preview = serializers.SerializerMethodField()
     last_message_data = serializers.SerializerMethodField()
+    display_name = serializers.SerializerMethodField()
+    system_name = serializers.SerializerMethodField()
+    google_contact_name = serializers.CharField(source='google_contact.display_name', read_only=True, allow_null=True)
+    needs_human_attention = serializers.BooleanField(read_only=True)
+    ai_active = serializers.SerializerMethodField()
+    ai_status = serializers.SerializerMethodField()
+    ai_status_reason = serializers.SerializerMethodField()
     
     class Meta:
         model = Chat
@@ -67,6 +76,9 @@ class ChatSerializer(serializers.ModelSerializer):
             'message_count', 'unread_count', 'is_archived', 'is_bot',
             'created_at', 'updated_at', 'last_message_at',
             'last_message_preview', 'last_message_data'
+            , 'display_name', 'system_name', 'google_contact_name',
+            'needs_human_attention', 'ai_active', 'ai_status', 'ai_status_reason',
+            'ai_paused_until', 'ai_disabled'
         ]
         read_only_fields = [
             'message_count', 'unread_count', 'is_archived', 'is_bot', 'created_at', 'updated_at', 'last_message_at'
@@ -99,6 +111,58 @@ class ChatSerializer(serializers.ModelSerializer):
                 'is_outgoing': last_message.is_outgoing
             }
         return None
+
+
+    @staticmethod
+    def _system_name(obj):
+        return obj.title or obj.username or obj.first_name or f'Chat {obj.telegram_id}'
+
+    def get_display_name(self, obj):
+        return obj.google_contact.display_name if obj.google_contact_id else self._system_name(obj)
+
+    def get_system_name(self, obj):
+        return self._system_name(obj)
+
+    def get_ai_active(self, obj):
+        runtime = self.context.get('ai_runtime') or {}
+        return self._ai_status(obj, runtime) == 'active'
+
+    @staticmethod
+    def _ai_status(obj, runtime):
+        if obj.ai_disabled:
+            return 'disabled'
+        if obj.ai_paused_until and obj.ai_paused_until > timezone.now():
+            return 'paused'
+        if runtime.get('global_paused'):
+            return 'global_paused'
+        if not runtime.get('enabled'):
+            return 'global_disabled'
+        if runtime.get('operator_present') and not runtime.get('online_override_enabled'):
+            return 'operator_paused'
+        return 'active'
+
+    def get_ai_status(self, obj):
+        return self._ai_status(obj, self.context.get('ai_runtime') or {})
+
+    def get_ai_status_reason(self, obj):
+        runtime = self.context.get('ai_runtime') or {}
+        ai_status = self._ai_status(obj, runtime)
+        if ai_status == 'disabled':
+            return 'ИИ отключён для этого диалога до ручного включения'
+        if ai_status == 'paused':
+            local_until = timezone.localtime(obj.ai_paused_until)
+            return f'ИИ временно отключён до {local_until:%d.%m.%Y %H:%M}'
+        if ai_status == 'global_disabled':
+            return 'ИИ-автоответчик выключен в общих настройках'
+        if ai_status == 'global_paused':
+            paused_until = runtime.get('global_paused_until')
+            if paused_until:
+                local_until = timezone.localtime(paused_until)
+                return f'ИИ-автоответчик временно выключен во всём проекте до {local_until:%d.%m.%Y %H:%M}'
+            return 'ИИ-автоответчик временно выключен во всём проекте'
+        if ai_status == 'operator_paused':
+            return 'ИИ приостановлен: администратор работает в CRM'
+        return 'Работает ИИ-автоответчик'
 
 
 class MessageSerializer(serializers.ModelSerializer):
@@ -275,3 +339,57 @@ class HistoryImportJobSerializer(serializers.ModelSerializer):
             'created_at', 'started_at', 'finished_at',
         ]
         read_only_fields = fields
+
+
+class AISettingsSerializer(serializers.ModelSerializer):
+    operator_present = serializers.BooleanField(read_only=True)
+    effective_enabled = serializers.SerializerMethodField()
+    global_status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AISettings
+        fields = [
+            'enabled', 'paused_until', 'effective_enabled', 'global_status',
+            'online_override_enabled', 'operator_present', 'model',
+            'base_prompt', 'company_information', 'fallback_text',
+            'offline_delay_seconds', 'online_delay_seconds', 'manual_pause_minutes',
+            'presence_timeout_seconds', 'operator_idle_seconds',
+            'max_incoming_age_minutes', 'context_message_limit',
+            'context_character_limit', 'max_response_tokens', 'updated_at',
+        ]
+        read_only_fields = [
+            'paused_until', 'effective_enabled', 'global_status', 'model',
+            'online_override_enabled', 'operator_present', 'updated_at',
+        ]
+
+    def get_effective_enabled(self, obj):
+        return obj.is_active()
+
+    def get_global_status(self, obj):
+        if not obj.enabled:
+            return 'disabled'
+        if obj.paused_until and obj.paused_until > timezone.now():
+            return 'paused'
+        return 'active'
+
+    def validate_offline_delay_seconds(self, value):
+        if not 5 <= value <= 3600:
+            raise serializers.ValidationError('Допустимое значение: от 5 до 3600 секунд.')
+        return value
+
+    validate_online_delay_seconds = validate_offline_delay_seconds
+
+    def validate_operator_idle_seconds(self, value):
+        if not 30 <= value <= 3600:
+            raise serializers.ValidationError('Допустимое значение: от 30 до 3600 секунд.')
+        return value
+
+    def validate_max_incoming_age_minutes(self, value):
+        if not 1 <= value <= 1440:
+            raise serializers.ValidationError('Допустимое значение: от 1 минуты до 24 часов.')
+        return value
+
+    def validate_manual_pause_minutes(self, value):
+        if not 1 <= value <= 1440:
+            raise serializers.ValidationError('Допустимое значение: от 1 до 1440 минут.')
+        return value

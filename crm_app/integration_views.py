@@ -222,6 +222,10 @@ class WhatsAppWebhookView(APIView):
                     if is_outgoing else
                     sender.get('senderName') or sender.get('senderContactName') or sender.get('chatName')
                 ),
+                contact_phone=(
+                    sender.get('senderPhoneNumber')
+                    or (str(chat_id).split('@', 1)[0] if str(chat_id).lower().endswith('@c.us') else None)
+                ),
                 occurred_at=event_time,
                 message_type=normalized['message_type'],
                 media_file_id=message_id if download_url else None,
@@ -241,6 +245,15 @@ class WhatsAppWebhookView(APIView):
             )
             if created and download_url:
                 download_green_api_media_task.delay(message.id)
+            if created:
+                from .services.ai_assistant import register_incoming_message, register_provider_outgoing
+                if is_outgoing:
+                    register_provider_outgoing(
+                        message.id,
+                        api_message=webhook_type == 'outgoingAPIMessageReceived',
+                    )
+                else:
+                    register_incoming_message(message.id)
             TelegramAccount.objects.filter(pk=account.pk).update(last_activity=timezone.now(), last_error='')
             return Response({'status': 'accepted', 'processed': 1})
 
@@ -260,8 +273,16 @@ class WhatsAppWebhookView(APIView):
         if webhook_type == 'stateInstanceChanged':
             state = payload.get('stateInstance') or ''
             TelegramAccount.objects.filter(pk=account.pk).update(
+                status=(
+                    TelegramAccount.AccountStatus.ACTIVE
+                    if state == 'authorized'
+                    else TelegramAccount.AccountStatus.ERROR
+                ),
                 last_activity=timezone.now(),
-                last_error='' if state == 'authorized' else f'GREEN-API instance state: {state}',
+                last_error=(
+                    '' if state == 'authorized'
+                    else f'GREEN-API: состояние инстанса — {state or "неизвестно"}'
+                ),
             )
         return Response({'status': 'accepted', 'processed': 0})
 

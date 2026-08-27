@@ -154,6 +154,12 @@ def process_incoming_message(
             )
 
         publish_message(message.id)
+        if created:
+            from .services.ai_assistant import register_incoming_message, register_provider_outgoing
+            if message.is_outgoing:
+                register_provider_outgoing(message.id, api_message=True)
+            else:
+                register_incoming_message(message.id)
         if media_file_id and message_type in ['photo', 'video', 'voice', 'document', 'sticker']:
             download_media.delay(
                 account_id=account_id,
@@ -282,6 +288,49 @@ def download_green_api_media_task(self, message_id: int):
     except Exception as exc:
         logger.exception('Could not download GREEN-API media for message %s', message_id)
         raise self.retry(exc=exc, countdown=min(300, 15 * (2 ** self.request.retries)))
+
+
+@shared_task(bind=True, max_retries=0, soft_time_limit=50, time_limit=60)
+def process_ai_reply_task(self, chat_id: int, generation: int, attempt: int = 0):
+    """Run a deduplicated AI reply without blocking webhook or connector processes."""
+    from .services.ai_assistant import process_ai_reply, queue_failure_fallback
+
+    try:
+        result = process_ai_reply(chat_id, generation)
+        if result.startswith('reschedule:'):
+            delay = max(5, min(int(result.split(':', 1)[1]), 3600))
+            process_ai_reply_task.apply_async(args=[chat_id, generation, attempt], countdown=delay)
+        return result
+    except Exception as exc:
+        logger.exception('AI reply failed for chat %s generation %s', chat_id, generation)
+        if attempt < 2:
+            delay = 4 if 'VSEGPT_RATE_LIMIT' in str(exc) else 15 * (2 ** attempt)
+            process_ai_reply_task.apply_async(args=[chat_id, generation, attempt + 1], countdown=delay)
+            return 'retry'
+        return queue_failure_fallback(chat_id, generation, str(exc))
+
+
+@shared_task(bind=True, max_retries=0, soft_time_limit=180, time_limit=210)
+def sync_google_contacts_task(self, integration_id: int):
+    """Synchronize Google contacts once and perform all chat matching locally."""
+    from .models import GoogleContactsIntegration
+    from .services.google_contacts import sync_contacts
+
+    try:
+        result = sync_contacts(integration_id)
+        GoogleContactsIntegration.objects.filter(pk=integration_id).update(
+            sync_in_progress=False,
+            last_result=result,
+            last_error='',
+        )
+        return result
+    except Exception as exc:
+        logger.exception('Google Contacts sync failed for integration %s', integration_id)
+        GoogleContactsIntegration.objects.filter(pk=integration_id).update(
+            sync_in_progress=False,
+            last_error=str(exc)[:2000],
+        )
+        return {'error': str(exc)}
 
 
 @shared_task

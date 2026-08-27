@@ -524,6 +524,9 @@ class TelegramClientManager:
                 else:
                     chat_type = 'unknown'
                 peer_metadata = self._telegram_peer_metadata(chat_entity)
+                peer_phone = getattr(chat_entity, 'phone', None) or getattr(sender_entity, 'phone', None)
+                if peer_phone:
+                    peer_metadata = {**peer_metadata, 'contact_phone': str(peer_phone)}
 
                 # Получение или создание чата
                 @database_sync_to_async
@@ -564,6 +567,9 @@ class TelegramClientManager:
                     return chat, created
 
                 chat, chat_created = await get_or_create_chat()
+                if peer_phone and not chat_created:
+                    from .google_contacts import match_chat_contact
+                    await database_sync_to_async(match_chat_contact)(chat)
 
                 # Определение типа сообщения и медиа
                 message_type = self._get_message_type(message) or 'text'
@@ -590,7 +596,7 @@ class TelegramClientManager:
 
                     # Создание сообщения (дедупликация по telegram_id + chat)
                     try:
-                        message_obj, _ = MessageModel.objects.get_or_create(
+                        message_obj, message_created = MessageModel.objects.get_or_create(
                             telegram_id=message.id,
                             chat=chat,
                             defaults={
@@ -621,11 +627,11 @@ class TelegramClientManager:
                             )
                         except MessageModel.DoesNotExist:
                             # Если сообщение всё же не существует, пропускаем
-                            return None
+                            return None, False
 
-                    return message_obj
+                    return message_obj, message_created
 
-                message_obj = await create_message_record()
+                message_obj, message_created = await create_message_record()
 
                 # Если сообщение не удалось создать/получить, пропускаем обработку
                 if message_obj is None:
@@ -645,13 +651,20 @@ class TelegramClientManager:
                         chat.unread_count += 1
                     chat.save(update_fields=['message_count', 'last_message_at', 'unread_count'])
 
-                await update_chat_stats()
+                if message_created:
+                    await update_chat_stats()
 
                 # Telegram file_id уже сохранен при создании сообщения
 
                 # Единый realtime-канал: чат сразу видят все операторы.
                 from .realtime import publish_message
                 await database_sync_to_async(publish_message)(message_obj.id)
+                from .ai_assistant import register_incoming_message, register_provider_outgoing
+                if message_created:
+                    if message_obj.is_outgoing:
+                        await database_sync_to_async(register_provider_outgoing)(message_obj.id)
+                    else:
+                        await database_sync_to_async(register_incoming_message)(message_obj.id)
                 logger.info(f"Processed incoming message {message.id} for chat {chat.id}")
                 
             except Exception as e:
@@ -1703,7 +1716,13 @@ class TelegramClientManager:
                         account.error_count = 0
                         await database_sync_to_async(account.save)()
 
-                        self._clients[account.id] = client
+                        # QR authentication runs in the web process, while live
+                        # Telegram updates are owned by the dedicated connector.
+                        # Keeping this authenticated client connected here creates
+                        # two connections with the same auth key. Telegram may then
+                        # deliver updates to this client, which has no event handlers,
+                        # until an API call on the connector wakes its connection.
+                        # Persist the StringSession and let the connector reconcile it.
                     else:
                         entry['status'] = 'pending'
 
@@ -1747,7 +1766,10 @@ class TelegramClientManager:
                     except Exception:
                         pass
                 finally:
-                    if entry.get('status') != 'authenticated' and client:
+                    # The QR client is only an authorization transport. It must
+                    # never remain connected after the session has been persisted;
+                    # the connector process is the single owner of live updates.
+                    if client:
                         try:
                             await client.disconnect()
                         except Exception:

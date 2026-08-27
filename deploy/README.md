@@ -43,6 +43,8 @@ nano .env
 - `crm.example.com` на свой домен;
 - `SECRET_KEY` на длинную случайную строку;
 - `DB_PASSWORD` и `MYSQL_ROOT_PASSWORD` на разные сложные пароли.
+- `VSEGPT_API_KEY`, если нужен ИИ-автоответчик;
+- `GOOGLE_CLIENT_ID` и `GOOGLE_CLIENT_SECRET`, если нужна синхронизация Google Контактов.
 
 Оставьте без изменений:
 

@@ -131,6 +131,10 @@ class GreenAPIClient:
     def get_settings(self):
         return self._request('GET', 'getSettings')
 
+    def get_state_instance(self):
+        """Return the current GREEN-API authorization state."""
+        return self._request('GET', 'getStateInstance')
+
     def get_chats(self, count=1000):
         # MAX GetChats has no count query parameter, unlike WhatsApp GetChats.
         if self.account.account_type == 'max':

@@ -20,7 +20,7 @@ RETRYABLE_STATUSES = (OutboundDelivery.Status.PENDING, OutboundDelivery.Status.R
 
 def enqueue_delivery(
     *, chat, text, media_path=None, reply_to_message=None, requested_by=None,
-    idempotency_key=None,
+    idempotency_key=None, origin=OutboundDelivery.Origin.OPERATOR,
 ):
     values = {
         'chat': chat,
@@ -28,6 +28,7 @@ def enqueue_delivery(
         'media_path': media_path,
         'reply_to_message': reply_to_message,
         'requested_by': requested_by,
+        'origin': origin,
     }
     if idempotency_key is None:
         return OutboundDelivery.objects.create(**values)
@@ -155,9 +156,13 @@ def process_next_delivery():
         message.metadata = {
             **(message.metadata or {}),
             'delivery_id': delivery.id,
+            'message_origin': delivery.origin,
             **({'original_filename': Path(delivery.media_path).name} if delivery.media_path else {}),
         }
         message.save(update_fields=['metadata', 'updated_at'])
+        if delivery.origin == OutboundDelivery.Origin.OPERATOR:
+            from .ai_assistant import register_manual_outgoing
+            register_manual_outgoing(message.id)
         if getattr(message, '_outbox_was_created', True):
             Chat.objects.filter(pk=delivery.chat_id).update(
                 message_count=F('message_count') + 1,

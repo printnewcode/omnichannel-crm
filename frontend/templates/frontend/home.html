@@ -6,7 +6,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Omnichannel CRM</title>
-  <link rel="stylesheet" href="{% static 'frontend/style.css' %}?v=20260823-mediastate" />
+  <link rel="stylesheet" href="{% static 'frontend/style.css' %}?v=20260825-chat-ai-modes-5" />
   <!-- Material Icons -->
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
@@ -49,7 +49,10 @@
     <aside class="sidebar">
       <div class="workspace-header">
         <div><div class="workspace-eyebrow">Omnichannel</div><div class="workspace-title">Диалоги</div></div>
-        <button class="header-icon-button" id="theme-toggle" onclick="toggleTheme()" title="Сменить тему" aria-label="Сменить тему"><i class="material-icons">brightness_6</i></button>
+        <div class="workspace-header-actions">
+          <div id="account-health" class="account-health" hidden></div>
+          <button class="header-icon-button" id="theme-toggle" onclick="toggleTheme()" title="Сменить тему" aria-label="Сменить тему"><i class="material-icons">brightness_6</i></button>
+        </div>
       </div>
       <nav class="messenger-switcher" aria-label="Выбор мессенджера">
         <button class="messenger-option active" type="button" data-messenger="all" aria-pressed="true"><span class="messenger-icon all-icon"><i class="material-icons">forum</i></span><span>Все</span></button>
@@ -57,11 +60,18 @@
         <button class="messenger-option" type="button" data-messenger="max" aria-pressed="false"><span class="messenger-icon max-icon">M</span><span>MAX</span></button>
         <button class="messenger-option" type="button" data-messenger="whatsapp" aria-pressed="false"><span class="messenger-icon whatsapp-icon"><i class="material-icons">chat</i></span><span>WhatsApp</span></button>
       </nav>
+      {% if user.is_staff %}<div class="ai-sidebar-controls">
+        <button type="button" class="ai-override-button" id="ai-override-btn" title="Временно разрешить ИИ отвечать, пока администратор работает в CRM">
+          <i class="material-icons">smart_toy</i><span>Включить ИИ-автоответчик</span>
+        </button>
+        <button type="button" class="header-icon-button ai-global-control-button" id="ai-global-control-btn" title="Глобальное управление ИИ" aria-label="Глобальное управление ИИ"><i class="material-icons">power_settings_new</i></button>
+        <button type="button" class="header-icon-button" id="ai-settings-btn" title="Настройки ИИ" aria-label="Настройки ИИ"><i class="material-icons">tune</i></button>
+      </div>{% endif %}
       <div class="sidebar-header">
         <div class="search-bar"><i class="material-icons search-icon">search</i><input type="text" placeholder="Поиск по диалогам" id="chat-search" aria-label="Поиск по диалогам"></div>
         <button type="button" class="header-icon-button" id="import-chats-btn" title="Загрузить чаты" aria-label="Загрузить чаты"><i class="material-icons">cloud_download</i></button>
+        {% if user.is_staff %}<button type="button" class="header-icon-button" id="google-contacts-btn" title="Синхронизировать Google Контакты" aria-label="Синхронизировать Google Контакты"><i class="material-icons">contacts</i></button>{% endif %}
       </div>
-      <div id="account-health" class="account-health" hidden></div>
       <button type="button" id="archive-toggle" class="archive-toggle" aria-pressed="false">
         <span class="archive-toggle-icon"><i class="material-icons">inventory_2</i></span>
         <span class="archive-toggle-copy"><strong>Архив</strong><small id="archive-subtitle">Нет архивных диалогов</small></span>
@@ -82,6 +92,7 @@
           <div class="chat-header-status" id="chat-status">Сообщения выбранного чата появятся здесь</div>
         </div>
         <div class="chat-header-actions">
+          <button type="button" class="chat-ai-status" id="chat-ai-status" hidden aria-label="Статус ИИ"><i class="material-icons">smart_toy</i></button>
           <button type="button" class="history-button" id="import-history-btn" hidden><i class="material-icons">history</i><span>Загрузить прошлые сообщения</span></button>
           <div id="message-search-container" class="message-search" hidden>
             <i class="material-icons" aria-hidden="true">search</i>
@@ -157,7 +168,61 @@
       <div class="app-modal__actions"><button type="button" class="secondary-button" data-close-modal="import-chats-modal">Отмена</button><button type="submit" class="primary-button">Загрузить</button></div>
     </form>
   </div>
-<script src="{% static 'frontend/app.js' %}?v=20260823-mediastate"></script>
+  <div id="chat-ai-control-modal" class="app-modal" hidden>
+    <div class="app-modal__backdrop" data-close-modal="chat-ai-control-modal"></div>
+    <form class="app-modal__card chat-ai-control-card" id="chat-ai-control-form">
+      <div class="app-modal__header">
+        <div><strong id="chat-ai-control-title">Отключить ИИ для диалога?</strong><span id="chat-ai-control-description">Выберите срок отключения автоответчика.</span></div>
+        <button type="button" class="icon-btn" data-close-modal="chat-ai-control-modal"><i class="material-icons">close</i></button>
+      </div>
+      <div id="chat-ai-disable-options" class="chat-ai-disable-options">
+        <p class="form-hint form-hint--warning">Пока ИИ отключён, входящие сообщения останутся без автоматического ответа.</p>
+        <label class="choice-field"><input type="radio" name="chat-ai-disable-type" value="temporary" checked><span><strong>Временно</strong><small>ИИ включится автоматически после выбранного срока</small></span></label>
+        <label class="form-field chat-ai-hours-field"><span>На сколько часов</span><input type="number" id="chat-ai-disable-hours" min="1" max="720" value="1" required></label>
+        <label class="choice-field"><input type="radio" name="chat-ai-disable-type" value="permanent"><span><strong>До ручного включения</strong><small>ИИ не включится самостоятельно</small></span></label>
+      </div>
+      <div class="app-modal__actions">
+        <button type="button" class="secondary-button" data-close-modal="chat-ai-control-modal">Отмена</button>
+        <button type="submit" class="danger-button" id="chat-ai-control-confirm">Отключить ИИ</button>
+      </div>
+    </form>
+  </div>
+  <div id="ai-global-control-modal" class="app-modal" hidden>
+    <div class="app-modal__backdrop" data-close-modal="ai-global-control-modal"></div>
+    <form class="app-modal__card chat-ai-control-card" id="ai-global-control-form">
+      <div class="app-modal__header"><div><strong id="ai-global-control-title">Отключить ИИ во всём проекте?</strong><span id="ai-global-control-description">ИИ перестанет отвечать во всех диалогах и мессенджерах.</span></div><button type="button" class="icon-btn" data-close-modal="ai-global-control-modal"><i class="material-icons">close</i></button></div>
+      <div class="chat-ai-disable-options" id="ai-global-disable-options">
+        <label class="choice-field"><input type="radio" name="ai-global-disable-type" value="temporary" checked><span><strong>На время</strong><small>Включится автоматически после выбранного срока</small></span></label>
+        <label class="form-field form-field--inline"><span>Количество часов</span><input type="number" id="ai-global-disable-hours" min="1" max="720" value="1" required></label>
+        <label class="choice-field"><input type="radio" name="ai-global-disable-type" value="permanent"><span><strong>До ручного включения</strong><small>ИИ можно будет включить этой же кнопкой</small></span></label>
+      </div>
+      <div class="app-modal__actions">
+        <button type="button" class="secondary-button" data-close-modal="ai-global-control-modal">Отмена</button>
+        <button type="submit" class="danger-button" id="ai-global-control-confirm">Отключить ИИ</button>
+      </div>
+    </form>
+  </div>
+  <div id="ai-settings-modal" class="app-modal" hidden>
+    <div class="app-modal__backdrop" data-close-modal="ai-settings-modal"></div>
+    <form class="app-modal__card app-modal__card--wide" id="ai-settings-form">
+      <div class="app-modal__header"><div><strong>Настройки ИИ</strong><span>Автоответчик работает только в личных диалогах; факты о компании берёт из информации ниже</span></div><button type="button" class="icon-btn" data-close-modal="ai-settings-modal"><i class="material-icons">close</i></button></div>
+      <label class="check-field ai-master-toggle"><input type="checkbox" id="ai-enabled"><span>Включить ИИ-автоответчик</span></label>
+      <label class="form-field"><span>Базовый промпт</span><textarea id="ai-base-prompt" rows="7" required></textarea><small>Правила, стиль и ограничения ответов ИИ.</small></label>
+      <label class="form-field"><span>Информация о компании</span><textarea id="ai-company-info" rows="9" placeholder="График работы, услуги, курсы, цены, адреса и другая подтверждённая информация"></textarea></label>
+      <label class="form-field"><span>Ответ при передаче администратору</span><input type="text" id="ai-fallback-text" maxlength="500" required></label>
+      <div class="settings-grid">
+        <label class="form-field"><span>Ответ без администратора, сек.</span><input type="number" id="ai-offline-delay" min="5" max="3600" required></label>
+        <label class="form-field"><span>Ответ при временном включении, сек.</span><input type="number" id="ai-online-delay" min="5" max="3600" required></label>
+        <label class="form-field"><span>Пауза после ручного ответа, мин.</span><input type="number" id="ai-manual-pause" min="1" max="1440" required></label>
+        <label class="form-field"><span>Сообщений в контексте</span><input type="number" id="ai-context-limit" min="4" max="50" required></label>
+        <label class="form-field"><span>Нет активности администратора, сек.</span><input type="number" id="ai-operator-idle" min="30" max="3600" required></label>
+        <label class="form-field"><span>Не отвечать на сообщения старше, мин.</span><input type="number" id="ai-message-max-age" min="1" max="1440" required></label>
+      </div>
+      <p class="form-hint">Когда CRM открыта, ИИ по умолчанию молчит. Кнопка над чатами временно разрешает ему отвечать после заданной задержки.</p>
+      <div class="app-modal__actions"><button type="button" class="secondary-button" data-close-modal="ai-settings-modal">Отмена</button><button type="submit" class="primary-button">Сохранить</button></div>
+    </form>
+  </div>
+<script src="{% static 'frontend/app.js' %}?v=20260825-chat-ai-modes-5"></script>
 </body>
 
 </html>

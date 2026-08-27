@@ -20,6 +20,7 @@ def ingest_provider_message(
     text='',
     sender_id=None,
     sender_name=None,
+    contact_phone=None,
     username=None,
     occurred_at=None,
     message_type=Message.MessageType.TEXT,
@@ -47,7 +48,11 @@ def ingest_provider_message(
             'title': sender_name or str(external_chat_id),
             'username': username,
             'first_name': sender_name,
-            'metadata': {'provider': account.account_type, 'external_chat_id': raw_chat_id},
+            'metadata': {
+                'provider': account.account_type,
+                'external_chat_id': raw_chat_id,
+                **({'contact_phone': str(contact_phone)} if contact_phone else {}),
+            },
             'is_bot': bool(is_bot),
         },
     )
@@ -61,6 +66,11 @@ def ingest_provider_message(
     if chat.is_bot != bool(is_bot):
         chat.is_bot = bool(is_bot)
         chat_updates.append('is_bot')
+    if contact_phone:
+        chat_metadata = chat.metadata if isinstance(chat.metadata, dict) else {}
+        if str(chat_metadata.get('contact_phone') or '') != str(contact_phone):
+            chat.metadata = {**chat_metadata, 'contact_phone': str(contact_phone)}
+            chat_updates.append('metadata')
     if chat_updates:
         chat.save(update_fields=[*chat_updates, 'updated_at'])
 
@@ -114,4 +124,7 @@ def ingest_provider_message(
 
     if publish:
         transaction.on_commit(lambda message_id=message.id: publish_message(message_id))
+    if contact_phone and not chat_created:
+        from .google_contacts import match_chat_contact
+        transaction.on_commit(lambda chat_id=chat.id: match_chat_contact(Chat.objects.get(pk=chat_id)))
     return message, created, chat_created

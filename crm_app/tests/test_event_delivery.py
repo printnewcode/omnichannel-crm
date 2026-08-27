@@ -1,6 +1,8 @@
 import hashlib
 import hmac
 import json
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from asgiref.sync import async_to_sync
@@ -627,6 +629,7 @@ class TelegramConnectorReconciliationTests(TransactionTestCase):
     def tearDown(self):
         self.manager._clients.clear()
         self.manager._tasks.clear()
+        self.manager._qr_logins.clear()
 
     def test_reconciliation_stops_account_disabled_in_admin(self):
         account = TelegramAccount.objects.create(
@@ -663,6 +666,70 @@ class TelegramConnectorReconciliationTests(TransactionTestCase):
         start_client.assert_awaited_once()
         account.refresh_from_db()
         self.assertIsNone(account.restart_requested_at)
+
+    def test_qr_authorization_disconnects_temporary_web_client(self):
+        account = TelegramAccount.objects.create(
+            name='QR account',
+            account_type=TelegramAccount.AccountType.PERSONAL,
+            status=TelegramAccount.AccountStatus.INACTIVE,
+            api_id=12345,
+            api_hash='test-api-hash',
+        )
+
+        class FakeSession:
+            @staticmethod
+            def save():
+                return 'authorized-session'
+
+        class FakeQrLogin:
+            url = 'tg://login?token=test'
+
+            async def wait(self):
+                return None
+
+        class FakeClient:
+            def __init__(self):
+                self.session = FakeSession()
+                self.disconnected = False
+
+            async def connect(self):
+                return None
+
+            async def qr_login(self):
+                return FakeQrLogin()
+
+            async def is_user_authorized(self):
+                return True
+
+            async def get_me(self):
+                return SimpleNamespace(
+                    id=987654,
+                    first_name='QR',
+                    last_name='Account',
+                    username='qr_account',
+                )
+
+            async def disconnect(self):
+                self.disconnected = True
+
+        fake_client = FakeClient()
+        with patch.object(self.manager, '_create_client', return_value=fake_client):
+            result = self.manager.create_qr_login_sync(account)
+            self.assertTrue(result['success'])
+
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                entry = self.manager._qr_logins.get(account.id, {})
+                if entry.get('status') == 'authenticated' and fake_client.disconnected:
+                    break
+                time.sleep(0.02)
+
+        account.refresh_from_db()
+        self.assertEqual(account.status, TelegramAccount.AccountStatus.ACTIVE)
+        self.assertEqual(account.session_string, 'authorized-session')
+        self.assertTrue(fake_client.disconnected)
+        self.assertNotIn(account.id, self.manager._clients)
+
 class AdminNamingTests(TestCase):
     def test_messenger_neutral_names_are_used(self):
         self.assertEqual(TelegramAccount._meta.verbose_name, 'Аккаунт мессенджера')

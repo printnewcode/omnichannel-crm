@@ -12,8 +12,67 @@ from django.contrib import messages
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
 from .models import (
-    TelegramAccount, Chat, Message, OutboundDelivery, HistoryImportJob
+    TelegramAccount, Chat, Message, OutboundDelivery, HistoryImportJob,
+    AISettings, GoogleContactsIntegration, GoogleContact,
 )
+
+
+@admin.register(AISettings)
+class AISettingsAdmin(admin.ModelAdmin):
+    fieldsets = (
+        ('Работа автоответчика', {
+            'fields': ('enabled', 'model', 'fallback_text'),
+        }),
+        ('Инструкции', {
+            'fields': ('base_prompt', 'company_information'),
+            'description': 'ИИ отвечает только на основании информации о компании. Промпт определяет стиль и правила ответа.',
+        }),
+        ('Таймеры и ограничения', {
+            'fields': (
+                'offline_delay_seconds', 'online_delay_seconds', 'manual_pause_minutes',
+                'presence_timeout_seconds', 'operator_idle_seconds',
+                'max_incoming_age_minutes', 'context_message_limit',
+                'context_character_limit', 'max_response_tokens',
+            ),
+        }),
+    )
+    readonly_fields = ('model',)
+
+    def has_add_permission(self, request):
+        return not AISettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(GoogleContactsIntegration)
+class GoogleContactsIntegrationAdmin(admin.ModelAdmin):
+    list_display = ('user', 'account_email', 'last_synced_at', 'sync_in_progress')
+    fields = (
+        'user', 'account_email', 'last_synced_at', 'sync_in_progress',
+        'last_result', 'last_error', 'created_at', 'updated_at',
+    )
+    readonly_fields = (
+        'user', 'account_email', 'last_synced_at', 'sync_in_progress',
+        'last_result', 'last_error', 'created_at', 'updated_at',
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(GoogleContact)
+class GoogleContactAdmin(admin.ModelAdmin):
+    list_display = ('display_name', 'phone_number', 'deleted', 'updated_at')
+    search_fields = ('display_name', 'phone_number', 'normalized_phone')
+    list_filter = ('deleted',)
+    readonly_fields = (
+        'integration', 'resource_name', 'display_name', 'phone_number',
+        'normalized_phone', 'deleted', 'provider_updated_at', 'updated_at',
+    )
+
+    def has_add_permission(self, request):
+        return False
 
 
 class TelegramAccountAdminForm(forms.ModelForm):

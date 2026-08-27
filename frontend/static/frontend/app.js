@@ -1,4 +1,9 @@
 const apiBase = "/api";
+const notifiedAccounts = new Set();
+const accountStartPending = new Map();
+const accountStartFailures = new Map();
+let accountHealthAccounts = [];
+let accountHealthOpen = false;
 
 // Theme Logic
 const toggleTheme = () => {
@@ -113,7 +118,9 @@ const request = async (url, options = {}) => {
       const errorData = await response.json().catch(() => ({}));
       console.error(`Request failed: ${url}`, errorData); // Debugging
       const rawError = errorData.error || errorData.detail || errorData.message || `HTTP ${response.status}`;
-      throw new Error(rawError);
+      const requestError = new Error(rawError);
+      requestError.data = errorData;
+      throw requestError;
     }
     return response.json();
   } catch (e) {
@@ -185,7 +192,8 @@ const renderSpecialMessage = (special) => {
 const createIdempotencyKey = () => {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   const bytes = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(bytes);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
+  else bytes.forEach((_, index) => { bytes[index] = Math.floor(Math.random() * 256); });
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const hex = [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
@@ -239,8 +247,9 @@ let chatNextUrl = null;
 let chatArchiveCount = 0;
 let chatFetchGeneration = 0;
 let sendInFlight = false;
+let aiRuntime = null;
 
-const getChatName = (chat) => chat?.title || chat?.username || chat?.first_name || "Без имени";
+const getChatName = (chat) => chat?.display_name || chat?.title || chat?.username || chat?.first_name || "Без имени";
 const getMessenger = (chat) => {
   const type = chat?.telegram_account?.account_type;
   return type === "whatsapp" || type === "max" ? type : "telegram";
@@ -304,28 +313,208 @@ const setReplyTarget = (message) => {
   document.getElementById('message-input')?.focus();
 };
 
-const renderAccountHealth = (chats) => {
+const accountTypePresentation = (account) => ({
+  personal: { label: 'Telegram', icon: 'send' },
+  bot: { label: 'Telegram-бот', icon: 'smart_toy' },
+  whatsapp: { label: 'WhatsApp', icon: 'chat' },
+  max: { label: 'MAX', icon: 'forum' },
+}[account.account_type] || { label: account.account_type_display || 'Мессенджер', icon: 'forum' });
+
+const accountHealthReason = (account) => {
+  const id = String(account.id);
+  if (accountStartFailures.has(id)) return accountStartFailures.get(id);
+  if (accountStartPending.has(id)) return 'Запускаем подключение…';
+  if (account.last_error) return account.last_error;
+  if (account.status === 'inactive') return 'Аккаунт выключен.';
+  if (account.status === 'authenticating') return 'Ожидается завершение авторизации.';
+  return account.status_display || 'Аккаунт недоступен.';
+};
+
+const renderAccountHealth = (accounts = accountHealthAccounts) => {
   const banner = document.getElementById("account-health");
   if (!banner) return;
-  const uniqueAccounts = new Map();
-  chats.filter((chat) => isChatInCurrentScope(chat)).forEach((chat) => {
-    const account = chat.telegram_account;
-    if (account && account.status !== "active") uniqueAccounts.set(String(account.id ?? account.name), account.name || "Аккаунт без названия");
-  });
-  const names = [...uniqueAccounts.values()];
-  banner.hidden = names.length === 0;
+  const visibleAccounts = accounts.filter((account) => (
+    account.status !== 'active'
+    || accountStartPending.has(String(account.id))
+    || accountStartFailures.has(String(account.id))
+  ));
+  banner.hidden = visibleAccounts.length === 0;
   banner.replaceChildren();
-  if (!names.length) return;
-  const icon = document.createElement("i");
-  icon.className = "material-icons";
-  icon.textContent = "warning_amber";
-  const info = document.createElement("div");
-  const title = document.createElement("strong");
-  title.textContent = names.length === 1 ? "Аккаунт требует внимания" : "Аккаунты требуют внимания";
-  const details = document.createElement("span");
-  details.textContent = names.join(", ");
-  info.append(title, details);
-  banner.append(icon, info);
+  if (!visibleAccounts.length) {
+    accountHealthOpen = false;
+    return;
+  }
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'header-icon-button account-health-trigger';
+  trigger.setAttribute('aria-label', `Не работают аккаунты: ${visibleAccounts.length}`);
+  trigger.setAttribute('aria-expanded', String(accountHealthOpen));
+  trigger.dataset.tooltip = `Не работают аккаунты: ${visibleAccounts.length}`;
+  trigger.title = `Не работают аккаунты: ${visibleAccounts.length}`;
+  const icon = document.createElement('i');
+  icon.className = 'material-icons';
+  icon.textContent = 'warning_amber';
+  const badge = document.createElement('span');
+  badge.className = 'account-health-badge';
+  badge.textContent = String(visibleAccounts.length);
+  trigger.append(icon, badge);
+
+  const popover = document.createElement('div');
+  popover.className = 'account-health-popover';
+  popover.hidden = !accountHealthOpen;
+
+  const heading = document.createElement('div');
+  heading.className = 'account-health-heading';
+  const headingCopy = document.createElement('div');
+  const title = document.createElement('strong');
+  title.textContent = 'Подключения требуют внимания';
+  const subtitle = document.createElement('span');
+  subtitle.textContent = `Не работают аккаунты: ${visibleAccounts.length}`;
+  headingCopy.append(title, subtitle);
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'account-health-close';
+  close.setAttribute('aria-label', 'Закрыть');
+  close.innerHTML = '<i class="material-icons">close</i>';
+  heading.append(headingCopy, close);
+
+  const list = document.createElement('div');
+  list.className = 'account-health-list';
+  visibleAccounts.forEach((account) => {
+    const id = String(account.id);
+    const presentation = accountTypePresentation(account);
+    const row = document.createElement('div');
+    row.className = `account-health-row status-${account.status}`;
+
+    const providerIcon = document.createElement('span');
+    providerIcon.className = `account-health-provider account-health-provider--${account.account_type}`;
+    const providerIconGlyph = document.createElement('i');
+    providerIconGlyph.className = 'material-icons';
+    providerIconGlyph.textContent = presentation.icon;
+    providerIcon.append(providerIconGlyph);
+
+    const copy = document.createElement('div');
+    copy.className = 'account-health-copy';
+    const name = document.createElement('strong');
+    name.textContent = account.name || 'Аккаунт без названия';
+    const meta = document.createElement('span');
+    meta.textContent = `${presentation.label} · ${accountHealthReason(account)}`;
+    copy.append(name, meta);
+
+    const actions = document.createElement('div');
+    actions.className = 'account-health-actions';
+    if (account.can_start || accountStartFailures.has(id)) {
+      const start = document.createElement('button');
+      start.type = 'button';
+      start.className = 'account-health-start';
+      start.disabled = accountStartPending.has(id);
+      start.innerHTML = `<i class="material-icons">${start.disabled ? 'sync' : 'play_arrow'}</i><span>${start.disabled ? 'Запускаем…' : 'Запустить'}</span>`;
+      start.addEventListener('click', () => startMessengerAccount(account));
+      actions.append(start);
+    }
+    if (account.admin_url && (accountStartFailures.has(id) || account.status === 'error')) {
+      const adminLink = document.createElement('a');
+      adminLink.className = 'account-health-admin';
+      adminLink.href = account.admin_url;
+      adminLink.target = '_blank';
+      adminLink.rel = 'noopener';
+      adminLink.textContent = 'Открыть админку';
+      actions.append(adminLink);
+    }
+    const content = document.createElement('div');
+    content.className = 'account-health-content';
+    content.append(copy, actions);
+    row.append(providerIcon, content);
+    list.append(row);
+  });
+  popover.append(heading, list);
+  banner.append(trigger, popover);
+
+  const setOpen = (open) => {
+    accountHealthOpen = open;
+    popover.hidden = !open;
+    trigger.setAttribute('aria-expanded', String(open));
+  };
+  trigger.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setOpen(!accountHealthOpen);
+  });
+  close.addEventListener('click', () => setOpen(false));
+};
+
+document.addEventListener('click', (event) => {
+  const banner = document.getElementById('account-health');
+  if (accountHealthOpen && banner && !banner.contains(event.target)) {
+    accountHealthOpen = false;
+    const popover = banner.querySelector('.account-health-popover');
+    const trigger = banner.querySelector('.account-health-trigger');
+    if (popover) popover.hidden = true;
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+  }
+});
+
+const fetchAccountHealth = async ({ quiet = false } = {}) => {
+  try {
+    const payload = await request(`${apiBase}/accounts/health/`);
+    accountHealthAccounts = Array.isArray(payload.accounts) ? payload.accounts : [];
+    accountHealthAccounts.forEach((account) => {
+      if (account.status === 'active' && !accountStartPending.has(String(account.id))) {
+        accountStartFailures.delete(String(account.id));
+      }
+    });
+    renderAccountHealth();
+    return accountHealthAccounts;
+  } catch (error) {
+    if (!quiet) console.error('Account health check failed', error);
+    return accountHealthAccounts;
+  }
+};
+
+const waitForAccountStart = async (account, requestedAt) => {
+  const id = String(account.id);
+  const startedAt = new Date(requestedAt).getTime();
+  for (let attempt = 0; attempt < 13; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const accounts = await fetchAccountHealth({ quiet: true });
+    const fresh = accounts.find((item) => String(item.id) === id);
+    if (!fresh) break;
+    if (fresh.status === 'error') {
+      throw new Error(fresh.last_error || 'Фоновый процесс не смог подключить аккаунт.');
+    }
+    const activityAt = fresh.last_activity ? new Date(fresh.last_activity).getTime() : 0;
+    if (fresh.status === 'active' && activityAt >= startedAt) return;
+  }
+  throw new Error('Подключение не подтвердилось вовремя. Проверьте аккаунт в админке.');
+};
+
+const startMessengerAccount = async (account) => {
+  const id = String(account.id);
+  if (accountStartPending.has(id)) return;
+  accountStartFailures.delete(id);
+  accountStartPending.set(id, true);
+  renderAccountHealth();
+  try {
+    const result = await request(`${apiBase}/accounts/${account.id}/start/`, { method: 'POST' });
+    if (result.status === 'starting' && result.requested_at) {
+      await waitForAccountStart(account, result.requested_at);
+    }
+    accountStartPending.delete(id);
+    accountStartFailures.delete(id);
+    await fetchAccountHealth({ quiet: true });
+    showNotification('Готово', `Аккаунт «${account.name}» запущен.`, 3500);
+  } catch (error) {
+    accountStartPending.delete(id);
+    const message = `${getRussianError(error.message)} Зайдите в админку и проверьте настройки аккаунта.`;
+    accountStartFailures.set(id, message);
+    if (error.data?.account) {
+      accountHealthAccounts = accountHealthAccounts.map((item) => (
+        String(item.id) === id ? error.data.account : item
+      ));
+    }
+    renderAccountHealth();
+    showNotification('Ошибка запуска', message, 8000);
+  }
 };
 
 const showConversationLoading = () => {
@@ -519,7 +708,8 @@ const renderChats = (chats) => {
     const name = getChatName(chat);
     li.dataset.searchText = [
       name, chat.username, chat.first_name, chat.last_name,
-      chat.last_message_preview, chat.last_message, chat.telegram_account?.name,
+      chat.system_name, chat.google_contact_name, chat.last_message_preview,
+      chat.last_message, chat.telegram_account?.name,
     ].filter(Boolean).join(' ').toLowerCase();
     const avatar = document.createElement('div');
     avatar.className = 'chat-avatar';
@@ -538,6 +728,13 @@ const renderChats = (chats) => {
     top.append(title, time);
     const source = document.createElement('div');
     source.className = 'chat-source-row';
+    if (chat.google_contact_name && chat.system_name && chat.google_contact_name !== chat.system_name) {
+      const systemName = document.createElement('span');
+      systemName.className = 'chat-system-name';
+      systemName.textContent = chat.system_name;
+      systemName.title = 'Имя в мессенджере';
+      source.appendChild(systemName);
+    }
     const messenger = getMessenger(chat);
     if (currentMessenger === 'all') {
       const messengerBadge = document.createElement('span');
@@ -562,12 +759,30 @@ const renderChats = (chats) => {
     preview.className = 'chat-last-message';
     preview.textContent = chat.last_message_preview || chat.last_message || 'Сообщений пока нет';
     bottom.appendChild(preview);
+    const indicators = document.createElement('span');
+    indicators.className = 'chat-row-indicators';
+    if (chat.needs_human_attention) {
+      const attention = document.createElement('span');
+      attention.className = 'human-attention-indicator';
+      attention.title = 'Требуется ответ администратора';
+      attention.setAttribute('aria-label', 'Требуется ответ администратора');
+      attention.innerHTML = '<i class="material-icons">support_agent</i>';
+      indicators.appendChild(attention);
+    }
+    const chatAIState = getEffectiveChatAIState(chat);
+    const chatAIIndicator = document.createElement('span');
+    chatAIIndicator.className = `chat-ai-list-status is-${chatAIState.status}`;
+    chatAIIndicator.title = chatAIState.reason;
+    chatAIIndicator.setAttribute('aria-label', chatAIState.reason);
+    chatAIIndicator.innerHTML = '<i class="material-icons">smart_toy</i>';
+    indicators.appendChild(chatAIIndicator);
     if (chat.unread_count > 0) {
       const unread = document.createElement('span');
       unread.className = 'unread-indicator';
       unread.textContent = chat.unread_count > 99 ? '99+' : String(chat.unread_count);
-      bottom.appendChild(unread);
+      indicators.appendChild(unread);
     }
+    bottom.appendChild(indicators);
     content.append(top, source, bottom);
     li.append(avatar, content);
     li.addEventListener('click', () => selectChat(chat.id));
@@ -1109,14 +1324,70 @@ window.downloadViaApi = async (msgId, button) => {
     setStatus(activeMediaDownloads.size ? `Загружаем файлы: ${activeMediaDownloads.size}` : '');
   }
 };
+const getEffectiveChatAIState = (chat) => {
+  if (!chat) return {active: false, paused: false, status: 'global-disabled', reason: 'ИИ-автоответчик выключен'};
+  if (chat.ai_disabled) {
+    return {active: false, paused: false, status: 'disabled', reason: 'ИИ отключён для этого диалога до ручного включения'};
+  }
+  const pausedUntil = chat.ai_paused_until ? new Date(chat.ai_paused_until) : null;
+  if (pausedUntil && !Number.isNaN(pausedUntil.getTime()) && pausedUntil > new Date()) {
+    return {
+      active: false,
+      paused: true,
+      status: 'paused',
+      reason: `ИИ временно отключён до ${pausedUntil.toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'})}`,
+    };
+  }
+  if (!aiRuntime) {
+    return {
+      active: Boolean(chat.ai_active),
+      paused: chat.ai_status === 'paused',
+      status: String(chat.ai_status || (chat.ai_active ? 'active' : 'global-disabled')).replaceAll('_', '-'),
+      reason: chat.ai_status_reason || 'ИИ-автоответчик выключен',
+    };
+  }
+  if (aiRuntime.global_status === 'paused') {
+    const globalPausedUntil = aiRuntime.paused_until ? new Date(aiRuntime.paused_until) : null;
+    const untilText = globalPausedUntil && !Number.isNaN(globalPausedUntil.getTime())
+      ? ` до ${globalPausedUntil.toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'})}`
+      : '';
+    return {active: false, paused: true, status: 'global-paused', reason: `ИИ временно выключен во всём проекте${untilText}`};
+  }
+  if (!(aiRuntime.effective_enabled ?? aiRuntime.enabled)) return {active: false, paused: false, status: 'global-disabled', reason: 'ИИ-автоответчик выключен во всём проекте'};
+  if (aiRuntime.operator_present && !aiRuntime.online_override_enabled) {
+    return {active: false, paused: false, status: 'operator-paused', reason: 'ИИ приостановлен: администратор работает в CRM'};
+  }
+  return {active: true, paused: false, status: 'active', reason: 'Работает ИИ-автоответчик'};
+};
 const setActiveChat = (chat) => {
   const accountType = getAccountType(chat);
   const active = document.getElementById("active-chat");
   if (active) active.textContent = chat ? getChatName(chat) : "Выберите диалог";
-  setStatus(chat ? getAccountLabel(chat) + " · " + (chat.telegram_account?.name || (accountType === "max" ? "MAX" : accountType === "whatsapp" ? "WhatsApp" : "Telegram")) : "Сообщения выбранного чата появятся здесь");
+  const accountStatus = chat
+    ? getAccountLabel(chat) + " · " + (chat.telegram_account?.name || (accountType === "max" ? "MAX" : accountType === "whatsapp" ? "WhatsApp" : "Telegram"))
+    : "Сообщения выбранного чата появятся здесь";
+  const systemName = chat?.google_contact_name && chat?.system_name && chat.google_contact_name !== chat.system_name
+    ? `Имя в мессенджере: ${chat.system_name} · `
+    : '';
+  setStatus(systemName + accountStatus);
   setComposerEnabled(Boolean(chat) && isChatInCurrentScope(chat));
   const historyButton = document.getElementById('import-history-btn');
   if (historyButton) historyButton.hidden = !chat || getAccountType(chat) === 'bot';
+  const aiStatus = document.getElementById('chat-ai-status');
+  if (aiStatus) {
+    const aiState = getEffectiveChatAIState(chat);
+    aiStatus.hidden = !chat;
+    aiStatus.classList.toggle('is-active', aiState.active);
+    aiStatus.classList.toggle('is-paused', aiState.status === 'paused');
+    aiStatus.classList.toggle('is-disabled', aiState.status === 'disabled');
+    aiStatus.classList.toggle('is-unavailable', ['global-disabled', 'global-paused', 'operator-paused'].includes(aiState.status));
+    aiStatus.title = aiState.active
+      ? `${aiState.reason}. Нажмите, чтобы отключить для этого диалога.`
+      : ['paused', 'disabled'].includes(aiState.status)
+        ? `${aiState.reason}. Нажмите, чтобы включить.`
+        : aiState.reason;
+    aiStatus.setAttribute('aria-label', aiStatus.title);
+  }
 };
 const validateSelectedFile = (file) => {
   if (!file || file.size === 0) throw new Error('Нельзя загрузить пустой файл.');
@@ -1224,6 +1495,339 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   document.getElementById('import-history-btn')?.addEventListener('click', () => openModal('import-history-modal'));
   document.getElementById('import-chats-btn')?.addEventListener('click', () => openModal('import-chats-modal'));
+  let chatAIControlAction = null;
+  const configureChatAIControlModal = (chat, aiState) => {
+    const title = document.getElementById('chat-ai-control-title');
+    const description = document.getElementById('chat-ai-control-description');
+    const options = document.getElementById('chat-ai-disable-options');
+    const confirm = document.getElementById('chat-ai-control-confirm');
+    if (aiState.active) {
+      chatAIControlAction = 'disable';
+      title.textContent = `Отключить ИИ для «${getChatName(chat)}»?`;
+      description.textContent = 'Выберите временное отключение или отключение до ручного включения.';
+      options.hidden = false;
+      confirm.textContent = 'Отключить ИИ';
+      confirm.classList.add('danger-button');
+      confirm.classList.remove('primary-button');
+      const temporary = document.querySelector('input[name="chat-ai-disable-type"][value="temporary"]');
+      const hours = document.getElementById('chat-ai-disable-hours');
+      if (temporary) temporary.checked = true;
+      if (hours) {
+        hours.value = '1';
+        hours.disabled = false;
+      }
+    } else {
+      chatAIControlAction = 'enable';
+      title.textContent = `Включить ИИ для «${getChatName(chat)}»?`;
+      description.textContent = aiState.status === 'disabled'
+        ? 'Автоответчик снова сможет отвечать на новые входящие сообщения.'
+        : 'Временная пауза будет отменена досрочно.';
+      options.hidden = true;
+      confirm.textContent = 'Включить ИИ';
+      confirm.classList.remove('danger-button');
+      confirm.classList.add('primary-button');
+    }
+    openModal('chat-ai-control-modal');
+  };
+
+  document.getElementById('chat-ai-status')?.addEventListener('click', () => {
+    const chat = allChats.find((item) => Number(item.id) === Number(currentChatId));
+    if (!chat) return;
+    const aiState = getEffectiveChatAIState(chat);
+    if (['global-disabled', 'global-paused', 'operator-paused'].includes(aiState.status)) {
+      showNotification('ИИ-автоответчик', aiState.reason);
+      return;
+    }
+    configureChatAIControlModal(chat, aiState);
+  });
+
+  document.querySelectorAll('input[name="chat-ai-disable-type"]').forEach((radio) => radio.addEventListener('change', () => {
+    const hours = document.getElementById('chat-ai-disable-hours');
+    if (hours) hours.disabled = document.querySelector('input[name="chat-ai-disable-type"]:checked')?.value !== 'temporary';
+  }));
+
+  document.getElementById('chat-ai-control-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const chat = allChats.find((item) => Number(item.id) === Number(currentChatId));
+    if (!chat || !chatAIControlAction) return;
+    const button = document.getElementById('chat-ai-control-confirm');
+    const payload = {mode: 'enabled'};
+    if (chatAIControlAction === 'disable') {
+      const disableType = document.querySelector('input[name="chat-ai-disable-type"]:checked')?.value || 'temporary';
+      payload.mode = disableType === 'permanent' ? 'disabled' : 'paused';
+      if (payload.mode === 'paused') payload.hours = Number(document.getElementById('chat-ai-disable-hours')?.value || 0);
+    }
+    if (button) button.disabled = true;
+    try {
+      const result = await request(`${apiBase}/chats/${chat.id}/set_ai_mode/`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      allChats = allChats.map((item) => Number(item.id) === Number(chat.id)
+        ? {...item, ai_disabled: Boolean(result.ai_disabled), ai_paused_until: result.ai_paused_until}
+        : item);
+      const updatedChat = allChats.find((item) => Number(item.id) === Number(chat.id));
+      renderChats(allChats);
+      setActiveChat(updatedChat);
+      closeModal('chat-ai-control-modal');
+      showNotification('ИИ-автоответчик', result.message);
+      await fetchChats();
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
+
+  const updateAIRuntimeControls = () => {
+    const button = document.getElementById('ai-override-btn');
+    if (!button || !aiRuntime) return;
+    const override = Boolean(aiRuntime.online_override_enabled);
+    const effectiveEnabled = Boolean(aiRuntime.effective_enabled ?? aiRuntime.enabled);
+    button.disabled = !effectiveEnabled;
+    button.classList.toggle('is-active', override);
+    button.querySelector('span').textContent = override ? 'Отключить ИИ-автоответчик' : 'Включить ИИ-автоответчик';
+    button.title = !effectiveEnabled
+      ? (aiRuntime.global_status === 'paused' ? 'ИИ временно выключен во всём проекте' : 'ИИ выключен во всём проекте')
+      : override
+        ? 'ИИ отвечает, если администратор не ответил вовремя'
+        : 'Временно разрешить ИИ отвечать, пока администратор работает в CRM';
+    const globalButton = document.getElementById('ai-global-control-btn');
+    if (globalButton) {
+      const globalStatus = aiRuntime.global_status || (aiRuntime.enabled ? 'active' : 'disabled');
+      globalButton.classList.toggle('is-active', globalStatus === 'active');
+      globalButton.classList.toggle('is-paused', globalStatus === 'paused');
+      globalButton.classList.toggle('is-disabled', globalStatus === 'disabled');
+      globalButton.title = globalStatus === 'active'
+        ? 'ИИ работает во всём проекте. Нажмите, чтобы отключить.'
+        : globalStatus === 'paused'
+          ? 'ИИ временно выключен во всём проекте. Нажмите, чтобы включить.'
+          : 'ИИ выключен во всём проекте. Нажмите, чтобы включить.';
+      globalButton.setAttribute('aria-label', globalButton.title);
+    }
+    renderChats(allChats);
+    const selectedChat = allChats.find((chat) => Number(chat.id) === Number(currentChatId));
+    if (selectedChat) setActiveChat(selectedChat);
+  };
+
+  const fillAISettings = (data) => {
+    aiRuntime = data;
+    document.getElementById('ai-enabled').checked = Boolean(data.enabled);
+    document.getElementById('ai-base-prompt').value = data.base_prompt || '';
+    document.getElementById('ai-company-info').value = data.company_information || '';
+    document.getElementById('ai-fallback-text').value = data.fallback_text || '';
+    document.getElementById('ai-offline-delay').value = data.offline_delay_seconds || 30;
+    document.getElementById('ai-online-delay').value = data.online_delay_seconds || 60;
+    document.getElementById('ai-manual-pause').value = data.manual_pause_minutes || 60;
+    document.getElementById('ai-context-limit').value = data.context_message_limit || 20;
+    document.getElementById('ai-operator-idle').value = data.operator_idle_seconds || 90;
+    document.getElementById('ai-message-max-age').value = data.max_incoming_age_minutes || 10;
+    updateAIRuntimeControls();
+  };
+
+  const loadAISettings = async () => {
+    try {
+      fillAISettings(await request(`${apiBase}/ai/settings/`));
+    } catch (error) {
+      console.error('Could not load AI settings', error);
+    }
+  };
+
+  document.getElementById('ai-settings-btn')?.addEventListener('click', async () => {
+    await loadAISettings();
+    openModal('ai-settings-modal');
+  });
+  document.getElementById('ai-settings-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try {
+      const data = await request(`${apiBase}/ai/settings/`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          enabled: document.getElementById('ai-enabled').checked,
+          base_prompt: document.getElementById('ai-base-prompt').value,
+          company_information: document.getElementById('ai-company-info').value,
+          fallback_text: document.getElementById('ai-fallback-text').value,
+          offline_delay_seconds: Number(document.getElementById('ai-offline-delay').value),
+          online_delay_seconds: Number(document.getElementById('ai-online-delay').value),
+          manual_pause_minutes: Number(document.getElementById('ai-manual-pause').value),
+          context_message_limit: Number(document.getElementById('ai-context-limit').value),
+          operator_idle_seconds: Number(document.getElementById('ai-operator-idle').value),
+          max_incoming_age_minutes: Number(document.getElementById('ai-message-max-age').value),
+        }),
+      });
+      fillAISettings(data);
+      closeModal('ai-settings-modal');
+      showNotification('Настройки ИИ', 'Настройки сохранены.');
+      await fetchChats();
+    } catch (error) {
+      setError(error.message);
+    }
+  });
+  document.getElementById('ai-override-btn')?.addEventListener('click', async () => {
+    if (!(aiRuntime?.effective_enabled ?? aiRuntime?.enabled)) return;
+    try {
+      const result = await request(`${apiBase}/ai/online-override/`, {
+        method: 'POST',
+        body: JSON.stringify({enabled: !aiRuntime.online_override_enabled}),
+      });
+      aiRuntime.online_override_enabled = Boolean(result.enabled);
+      updateAIRuntimeControls();
+      await fetchChats();
+    } catch (error) {
+      setError(error.message);
+    }
+  });
+
+  let aiGlobalControlAction = null;
+  const configureAIGlobalControlModal = () => {
+    if (!aiRuntime) return;
+    const active = Boolean(aiRuntime.effective_enabled ?? aiRuntime.enabled);
+    const title = document.getElementById('ai-global-control-title');
+    const description = document.getElementById('ai-global-control-description');
+    const options = document.getElementById('ai-global-disable-options');
+    const confirm = document.getElementById('ai-global-control-confirm');
+    aiGlobalControlAction = active ? 'disable' : 'enable';
+    if (active) {
+      title.textContent = 'Отключить ИИ во всём проекте?';
+      description.textContent = 'ИИ перестанет отвечать во всех диалогах и мессенджерах.';
+      options.hidden = false;
+      confirm.textContent = 'Отключить ИИ';
+      confirm.classList.add('danger-button');
+      confirm.classList.remove('primary-button');
+      const temporary = document.querySelector('input[name="ai-global-disable-type"][value="temporary"]');
+      const hours = document.getElementById('ai-global-disable-hours');
+      if (temporary) temporary.checked = true;
+      if (hours) { hours.value = '1'; hours.disabled = false; }
+    } else {
+      title.textContent = 'Включить ИИ во всём проекте?';
+      description.textContent = aiRuntime.global_status === 'paused'
+        ? 'Временная пауза будет отменена досрочно.'
+        : 'ИИ снова сможет отвечать на новые входящие сообщения.';
+      options.hidden = true;
+      confirm.textContent = 'Включить ИИ';
+      confirm.classList.remove('danger-button');
+      confirm.classList.add('primary-button');
+    }
+    openModal('ai-global-control-modal');
+  };
+  document.getElementById('ai-global-control-btn')?.addEventListener('click', configureAIGlobalControlModal);
+  document.querySelectorAll('input[name="ai-global-disable-type"]').forEach((radio) => radio.addEventListener('change', () => {
+    const hours = document.getElementById('ai-global-disable-hours');
+    if (hours) hours.disabled = document.querySelector('input[name="ai-global-disable-type"]:checked')?.value !== 'temporary';
+  }));
+  document.getElementById('ai-global-control-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!aiGlobalControlAction) return;
+    const confirm = document.getElementById('ai-global-control-confirm');
+    const payload = {mode: 'enabled'};
+    if (aiGlobalControlAction === 'disable') {
+      const disableType = document.querySelector('input[name="ai-global-disable-type"]:checked')?.value || 'temporary';
+      payload.mode = disableType === 'permanent' ? 'disabled' : 'paused';
+      if (payload.mode === 'paused') payload.hours = Number(document.getElementById('ai-global-disable-hours')?.value || 0);
+    }
+    if (confirm) confirm.disabled = true;
+    try {
+      fillAISettings(await request(`${apiBase}/ai/global-mode/`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }));
+      closeModal('ai-global-control-modal');
+      showNotification('ИИ-автоответчик', payload.mode === 'enabled' ? 'ИИ включён во всём проекте.' : 'ИИ отключён во всём проекте.');
+      await fetchChats();
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      if (confirm) confirm.disabled = false;
+    }
+  });
+
+  const presenceTabId = sessionStorage.getItem('crm-presence-tab-id') || createIdempotencyKey();
+  sessionStorage.setItem('crm-presence-tab-id', presenceTabId);
+  let lastOperatorActivityAt = Date.now();
+  const operatorIsActuallyActive = () => {
+    const idleSeconds = Math.max(30, Number(aiRuntime?.operator_idle_seconds || 90));
+    return !document.hidden
+      && document.hasFocus()
+      && Date.now() - lastOperatorActivityAt <= idleSeconds * 1000;
+  };
+  const sendPresence = async () => {
+    try {
+      const state = await request(`${apiBase}/ai/presence/`, {
+        method: 'POST',
+        body: JSON.stringify({tab_id: presenceTabId, is_visible: operatorIsActuallyActive()}),
+      });
+      if (aiRuntime) {
+        aiRuntime.operator_present = state.operator_present;
+        aiRuntime.online_override_enabled = state.online_override_enabled;
+        aiRuntime.enabled = state.enabled;
+        aiRuntime.effective_enabled = state.effective_enabled;
+        aiRuntime.paused_until = state.paused_until;
+        aiRuntime.global_status = state.global_status;
+        updateAIRuntimeControls();
+      }
+    } catch (error) {
+      console.debug('Presence heartbeat failed', error);
+    }
+  };
+  setInterval(sendPresence, 20000);
+  document.addEventListener('visibilitychange', sendPresence);
+  window.addEventListener('blur', sendPresence);
+  window.addEventListener('focus', () => {
+    lastOperatorActivityAt = Date.now();
+    sendPresence();
+  });
+  ['pointerdown', 'keydown', 'touchstart', 'scroll'].forEach((eventName) => {
+    document.addEventListener(eventName, () => {
+      lastOperatorActivityAt = Date.now();
+    }, {passive: true});
+  });
+
+  const pollGoogleContactsSync = () => {
+    let attempts = 0;
+    const timer = setInterval(async () => {
+      attempts += 1;
+      try {
+        const state = await request(`${apiBase}/google-contacts/status/`);
+        if (!state.sync_in_progress || attempts >= 60) {
+          clearInterval(timer);
+          if (state.last_error) setError(state.last_error);
+          else {
+            const result = state.last_result || {};
+            showNotification('Google Контакты', `Синхронизация завершена. Сопоставлено чатов: ${result.matched_chats || 0}.`, 7000);
+            await fetchChats({reset: true});
+          }
+        }
+      } catch (error) {
+        clearInterval(timer);
+        setError(error.message);
+      }
+    }, 2000);
+  };
+  document.getElementById('google-contacts-btn')?.addEventListener('click', async () => {
+    try {
+      const state = await request(`${apiBase}/google-contacts/status/`);
+      if (!state.configured) throw new Error('Добавьте GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET в .env.');
+      if (!state.connected) {
+        window.location.href = `${apiBase}/google-contacts/connect/`;
+        return;
+      }
+      await request(`${apiBase}/google-contacts/sync/`, {method: 'POST'});
+      showNotification('Google Контакты', 'Синхронизация запущена в фоне.');
+      pollGoogleContactsSync();
+    } catch (error) {
+      setError(error.message);
+    }
+  });
+
+  const query = new URLSearchParams(window.location.search);
+  if (query.get('google_contacts_connected')) {
+    showNotification('Google Контакты', 'Аккаунт подключён. Нажмите кнопку контактов для первой синхронизации.', 7000);
+    history.replaceState({}, '', window.location.pathname);
+  } else if (query.get('google_contacts_error')) {
+    setError(query.get('google_contacts_error'));
+    history.replaceState({}, '', window.location.pathname);
+  }
+  loadAISettings().then(sendPresence);
 
   const monitorImportJobs = (jobIds, kind) => {
     const timer = setInterval(async () => {
@@ -1314,7 +1918,6 @@ document.addEventListener("DOMContentLoaded", () => {
           || Boolean(chat.is_archived) !== archiveMode
         ) return;
         allChats = [...allChats.filter((item) => Number(item.id) !== savedId), chat];
-        renderAccountHealth(allChats);
         renderChats(allChats);
         selectChat(chat.id);
       })
@@ -1327,8 +1930,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const applyFetchedChats = (chats) => {
     allChats = chats;
-    renderAccountHealth(chats);
     renderChats(chats);
+    const selectedChat = chats.find((chat) => Number(chat.id) === Number(currentChatId));
+    if (selectedChat) setActiveChat(selectedChat);
     restoreChatSelection(chats);
   };
 
@@ -1383,7 +1987,6 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       } catch (error) {
         console.error("Critical error in fetchChats:", error);
-        lastAccountsSnapshot = "";
       }
     })();
 
@@ -1397,40 +2000,6 @@ document.addEventListener("DOMContentLoaded", () => {
     return chatFetchPromise;
   };
   window.fetchChatsGlobal = fetchChats;
-
-  window.activateAccount = async (id, name) => {
-    try {
-      showNotification('Информация', `Пожалуйста, подождите, аккаунт ${name} активируется...`, 3000);
-      setStatus(`Activating ${name}...`);
-
-      // Force immediate visual update if possible
-      const btn = event?.target;
-      if (btn && btn.tagName === 'BUTTON') {
-        const card = btn.closest('.account-notification-card');
-        if (card) {
-          card.classList.add('authenticating');
-          card.querySelector('.account-notification-header span').textContent = `${name}: Активация...`;
-          card.querySelector('.material-icons').textContent = 'sync';
-          card.querySelector('.material-icons').classList.add('spin');
-          btn.remove();
-          const progress = document.createElement('div');
-          progress.className = 'activation-progress';
-          progress.textContent = 'Пожалуйста, подождите...';
-          card.appendChild(progress);
-        }
-      }
-
-      await request(`${apiBase}/accounts/${id}/start/`, { method: 'POST' });
-      // Reset notification tracking for this account immediately
-      notifiedAccounts.delete(name);
-      // Next poll will confirm authenticating status
-      fetchChats();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setStatus("Online");
-    }
-};
 
   const fetchMessages = async (forceScroll = false, options = {}) => {
     if (!currentChatId) return;
@@ -1719,11 +2288,16 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
       scheduleRealtimeRefresh(currentChatId);
+      fetchAccountHealth({ quiet: true });
       connectRealtime();
     }
   });
 
   fetchChats({reset: true});
+  fetchAccountHealth();
+  setInterval(() => {
+    if (!document.hidden) fetchAccountHealth({ quiet: true });
+  }, 30000);
   connectRealtime();
   startFallbackPolling();
 });
