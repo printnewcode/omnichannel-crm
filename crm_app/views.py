@@ -29,12 +29,12 @@ from django.core import signing
 from django.urls import reverse
 from .models import (
     TelegramAccount, Chat, Message, HistoryImportJob, AISettings,
-    OperatorPresenceSession, GoogleContactsIntegration, ChatAIState,
+    OperatorPresenceSession, GoogleContactsIntegration, ChatAIState, QuickReply,
 )
 from .serializers import (
     TelegramAccountSerializer, ChatSerializer, MessageSerializer,
     SendMessageSerializer, HistoryImportJobSerializer
-    , AISettingsSerializer
+    , AISettingsSerializer, QuickReplySerializer
 )
 from .services.telegram_client_manager import TelegramClientManager
 from .services.message_router import MessageRouter
@@ -45,6 +45,18 @@ logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_ATTACHMENTS_PER_MESSAGE = 10
+
+
+class QuickReplyViewSet(viewsets.ModelViewSet):
+    """Staff-managed reusable replies for the provider-neutral composer."""
+
+    queryset = QuickReply.objects.select_related('created_by').all()
+    serializer_class = QuickReplySerializer
+    permission_classes = [permissions.IsAdminUser]
+    pagination_class = None
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
 
 
 class MessagePagination(PageNumberPagination):

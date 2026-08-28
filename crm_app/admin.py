@@ -14,7 +14,19 @@ from django.utils.safestring import mark_safe
 from .models import (
     TelegramAccount, Chat, Message, OutboundDelivery, HistoryImportJob,
     AISettings, GoogleContactsIntegration, GoogleContact,
+    QuickReply,
 )
+
+
+@admin.register(QuickReply)
+class QuickReplyAdmin(admin.ModelAdmin):
+    list_display = ('command', 'short_text', 'created_by', 'updated_at')
+    search_fields = ('command', 'text')
+    readonly_fields = ('created_by', 'created_at', 'updated_at')
+
+    @admin.display(description='Текст')
+    def short_text(self, obj):
+        return obj.text if len(obj.text) <= 80 else f'{obj.text[:77]}…'
 
 
 @admin.register(AISettings)

@@ -122,6 +122,7 @@ const request = async (url, options = {}) => {
       requestError.data = errorData;
       throw requestError;
     }
+    if (response.status === 204) return null;
     return response.json();
   } catch (e) {
     console.error(`Request error: ${url}`, e); // Debugging
@@ -2077,6 +2078,248 @@ document.addEventListener("DOMContentLoaded", () => {
   const emojiBtn = document.getElementById('emoji-btn');
   const emojiPicker = document.getElementById('emoji-picker');
   const messageInput = document.getElementById('message-input');
+
+  // Provider-neutral quick replies. The selected text is inserted for review,
+  // never sent automatically, so the same interaction is safe for every messenger.
+  const quickReplyShell = document.getElementById('quick-reply-shell');
+  const quickReplyMenu = document.getElementById('quick-reply-menu');
+  const quickReplySettingsButton = document.getElementById('quick-reply-settings-btn');
+  const quickReplySettingsList = document.getElementById('quick-reply-settings-list');
+  const quickReplyAddButton = document.getElementById('quick-reply-add-btn');
+  const quickReplyEditor = document.getElementById('quick-reply-editor');
+  const quickReplyEditorTitle = document.getElementById('quick-reply-editor-title');
+  const quickReplyCommand = document.getElementById('quick-reply-command');
+  const quickReplyText = document.getElementById('quick-reply-text');
+  const quickReplyFormError = document.getElementById('quick-reply-form-error');
+  let quickReplies = [];
+  let quickReplyMatches = [];
+  let quickReplyActiveIndex = -1;
+  let quickReplyEditingId = null;
+
+  const closeQuickReplyMenu = () => {
+    if (quickReplyShell) quickReplyShell.hidden = true;
+    quickReplyMatches = [];
+    quickReplyActiveIndex = -1;
+  };
+
+  const insertQuickReply = (reply) => {
+    if (!messageInput || !reply) return;
+    messageInput.value = reply.text;
+    messageInput.dispatchEvent(new Event('input', {bubbles: true}));
+    closeQuickReplyMenu();
+    messageInput.focus();
+    messageInput.setSelectionRange(messageInput.value.length, messageInput.value.length);
+  };
+
+  const renderQuickReplyMenu = () => {
+    if (!quickReplyMenu) return;
+    quickReplyMenu.replaceChildren();
+    if (!quickReplyMatches.length) {
+      const empty = document.createElement('div');
+      empty.className = 'quick-reply-empty';
+      empty.textContent = quickReplies.length ? 'Нет подходящих быстрых ответов' : 'Быстрых ответов пока нет';
+      quickReplyMenu.appendChild(empty);
+      return;
+    }
+    quickReplyMatches.forEach((reply, index) => {
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'quick-reply-option';
+      option.setAttribute('role', 'option');
+      option.setAttribute('aria-selected', String(index === quickReplyActiveIndex));
+      option.classList.toggle('is-active', index === quickReplyActiveIndex);
+      const command = document.createElement('strong');
+      command.textContent = reply.command;
+      const preview = document.createElement('span');
+      preview.textContent = reply.text;
+      option.append(command, preview);
+      option.addEventListener('mouseenter', () => {
+        quickReplyActiveIndex = index;
+        [...quickReplyMenu.querySelectorAll('.quick-reply-option')].forEach((item, itemIndex) => {
+          item.classList.toggle('is-active', itemIndex === index);
+          item.setAttribute('aria-selected', String(itemIndex === index));
+        });
+      });
+      option.addEventListener('click', () => insertQuickReply(reply));
+      quickReplyMenu.appendChild(option);
+    });
+    if (quickReplyActiveIndex >= 0) {
+      quickReplyMenu.children[quickReplyActiveIndex]?.scrollIntoView({block: 'nearest'});
+    }
+  };
+
+  const updateQuickReplyMenu = () => {
+    if (!messageInput || !quickReplyShell) return;
+    const query = messageInput.value.trim().toLowerCase();
+    if (!/^\/[^\s]*$/.test(query)) {
+      closeQuickReplyMenu();
+      return;
+    }
+    quickReplyMatches = quickReplies.filter((reply) => reply.command.startsWith(query));
+    quickReplyActiveIndex = quickReplyMatches.length ? 0 : -1;
+    renderQuickReplyMenu();
+    quickReplyShell.hidden = false;
+  };
+
+  const quickReplyErrorText = (error) => {
+    const data = error?.data || {};
+    const detail = data.command?.[0] || data.text?.[0] || data.non_field_errors?.[0] || data.detail;
+    return detail || error?.message || 'Не удалось сохранить быстрый ответ.';
+  };
+
+  const renderQuickReplySettings = () => {
+    if (!quickReplySettingsList) return;
+    quickReplySettingsList.replaceChildren();
+    if (!quickReplies.length) {
+      const empty = document.createElement('div');
+      empty.className = 'quick-reply-settings-empty';
+      empty.textContent = 'Добавьте первый быстрый ответ';
+      quickReplySettingsList.appendChild(empty);
+      return;
+    }
+    quickReplies.forEach((reply) => {
+      const item = document.createElement('div');
+      item.className = 'quick-reply-settings-item';
+      const copy = document.createElement('div');
+      copy.className = 'quick-reply-settings-copy';
+      const command = document.createElement('strong');
+      command.textContent = reply.command;
+      const text = document.createElement('span');
+      text.textContent = reply.text;
+      copy.append(command, text);
+      const actions = document.createElement('div');
+      actions.className = 'quick-reply-settings-actions';
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'quick-reply-item-button';
+      edit.title = `Изменить ${reply.command}`;
+      edit.setAttribute('aria-label', edit.title);
+      edit.innerHTML = '<i class="material-icons">edit</i>';
+      edit.addEventListener('click', () => showQuickReplyEditor(reply));
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'quick-reply-item-button quick-reply-item-button--delete';
+      remove.title = `Удалить ${reply.command}`;
+      remove.setAttribute('aria-label', remove.title);
+      remove.innerHTML = '<i class="material-icons">delete_outline</i>';
+      remove.addEventListener('click', async () => {
+        if (remove.dataset.confirm !== '1') {
+          remove.dataset.confirm = '1';
+          remove.title = `Нажмите ещё раз, чтобы удалить ${reply.command}`;
+          remove.setAttribute('aria-label', remove.title);
+          remove.innerHTML = '<i class="material-icons">delete_forever</i>';
+          item.classList.add('is-confirming');
+          setTimeout(() => {
+            if (!remove.isConnected) return;
+            remove.dataset.confirm = '0';
+            remove.title = `Удалить ${reply.command}`;
+            remove.setAttribute('aria-label', remove.title);
+            remove.innerHTML = '<i class="material-icons">delete_outline</i>';
+            item.classList.remove('is-confirming');
+          }, 4000);
+          return;
+        }
+        try {
+          await request(`${apiBase}/quick-replies/${reply.id}/`, {method: 'DELETE'});
+          quickReplies = quickReplies.filter((item) => item.id !== reply.id);
+          if (quickReplyEditingId === reply.id) hideQuickReplyEditor();
+          renderQuickReplySettings();
+          updateQuickReplyMenu();
+        } catch (error) {
+          setError(quickReplyErrorText(error));
+        }
+      });
+      actions.append(edit, remove);
+      item.append(copy, actions);
+      quickReplySettingsList.appendChild(item);
+    });
+  };
+
+  const hideQuickReplyEditor = () => {
+    quickReplyEditingId = null;
+    if (quickReplyEditor) quickReplyEditor.hidden = true;
+    if (quickReplyFormError) quickReplyFormError.hidden = true;
+  };
+
+  const showQuickReplyEditor = (reply = null) => {
+    quickReplyEditingId = reply?.id || null;
+    if (quickReplyEditorTitle) quickReplyEditorTitle.textContent = reply ? 'Изменить быстрый ответ' : 'Новый быстрый ответ';
+    if (quickReplyCommand) quickReplyCommand.value = reply?.command || '/';
+    if (quickReplyText) quickReplyText.value = reply?.text || '';
+    if (quickReplyFormError) quickReplyFormError.hidden = true;
+    if (quickReplyEditor) quickReplyEditor.hidden = false;
+    quickReplyCommand?.focus();
+  };
+
+  const loadQuickReplies = async () => {
+    if (!quickReplyShell) return;
+    try {
+      quickReplies = normalizeList(await request(`${apiBase}/quick-replies/`));
+      quickReplies.sort((a, b) => a.command.localeCompare(b.command, 'ru'));
+      renderQuickReplySettings();
+      const settingsModal = document.getElementById('quick-reply-settings-modal');
+      if (messageInput?.value.startsWith('/') && settingsModal?.hidden !== false) updateQuickReplyMenu();
+    } catch (error) {
+      console.error('Could not load quick replies', error);
+    }
+  };
+
+  if (messageInput && quickReplyShell) {
+    messageInput.addEventListener('input', updateQuickReplyMenu);
+    messageInput.addEventListener('keydown', (event) => {
+      if (quickReplyShell.hidden) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        if (!quickReplyMatches.length) return;
+        event.preventDefault();
+        const direction = event.key === 'ArrowDown' ? 1 : -1;
+        quickReplyActiveIndex = (quickReplyActiveIndex + direction + quickReplyMatches.length) % quickReplyMatches.length;
+        renderQuickReplyMenu();
+      } else if (event.key === 'Enter' && quickReplyActiveIndex >= 0) {
+        event.preventDefault();
+        insertQuickReply(quickReplyMatches[quickReplyActiveIndex]);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        closeQuickReplyMenu();
+      }
+    });
+    document.getElementById('send-form')?.addEventListener('submit', closeQuickReplyMenu);
+    document.addEventListener('click', (event) => {
+      if (!event.target.closest('#quick-reply-shell') && event.target !== messageInput) closeQuickReplyMenu();
+    });
+    quickReplySettingsButton?.addEventListener('click', () => {
+      closeQuickReplyMenu();
+      hideQuickReplyEditor();
+      renderQuickReplySettings();
+      openModal('quick-reply-settings-modal');
+    });
+    quickReplyAddButton?.addEventListener('click', () => showQuickReplyEditor());
+    document.getElementById('quick-reply-editor-cancel')?.addEventListener('click', hideQuickReplyEditor);
+    quickReplyEditor?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const submit = quickReplyEditor.querySelector('[type="submit"]');
+      if (submit) submit.disabled = true;
+      if (quickReplyFormError) quickReplyFormError.hidden = true;
+      const endpoint = quickReplyEditingId
+        ? `${apiBase}/quick-replies/${quickReplyEditingId}/`
+        : `${apiBase}/quick-replies/`;
+      try {
+        await request(endpoint, {
+          method: quickReplyEditingId ? 'PATCH' : 'POST',
+          body: JSON.stringify({command: quickReplyCommand.value, text: quickReplyText.value}),
+        });
+        await loadQuickReplies();
+        hideQuickReplyEditor();
+      } catch (error) {
+        if (quickReplyFormError) {
+          quickReplyFormError.textContent = quickReplyErrorText(error);
+          quickReplyFormError.hidden = false;
+        }
+      } finally {
+        if (submit) submit.disabled = false;
+      }
+    });
+    loadQuickReplies();
+  }
 
   attachBtn?.addEventListener('click', () => fileInput?.click());
   fileInput?.addEventListener('change', async (event) => {

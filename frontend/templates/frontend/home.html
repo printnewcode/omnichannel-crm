@@ -6,7 +6,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Omnichannel CRM</title>
-  <link rel="stylesheet" href="{% static 'frontend/style.css' %}?v=20260825-chat-ai-modes-5" />
+  <link rel="stylesheet" href="{% static 'frontend/style.css' %}?v=20260828-quick-replies-1" />
   <!-- Material Icons -->
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
@@ -121,6 +121,12 @@
       </div>
 
       <form id="send-form" class="chat-input-area" autocomplete="off">
+        {% if user.is_staff %}
+        <div id="quick-reply-shell" class="quick-reply-shell" hidden>
+          <div id="quick-reply-menu" class="quick-reply-menu" role="listbox" aria-label="Быстрые ответы"></div>
+          <button type="button" id="quick-reply-settings-btn" class="quick-reply-settings-button" title="Настроить быстрые ответы" aria-label="Настроить быстрые ответы"><i class="material-icons">settings</i></button>
+        </div>
+        {% endif %}
         <input type="file" id="media-upload" multiple style="display: none;" />
         <button type="button" class="icon-btn" id="attach-btn" title="Прикрепить файлы" aria-label="Прикрепить файлы"><i class="material-icons">attach_file</i></button>
         <button type="button" class="icon-btn" id="emoji-btn" title="Эмодзи" aria-label="Открыть меню эмодзи"><i class="material-icons">sentiment_satisfied_alt</i></button>
@@ -222,7 +228,27 @@
       <div class="app-modal__actions"><button type="button" class="secondary-button" data-close-modal="ai-settings-modal">Отмена</button><button type="submit" class="primary-button">Сохранить</button></div>
     </form>
   </div>
-<script src="{% static 'frontend/app.js' %}?v=20260825-chat-ai-modes-5"></script>
+  {% if user.is_staff %}
+  <div id="quick-reply-settings-modal" class="app-modal" hidden>
+    <div class="app-modal__backdrop" data-close-modal="quick-reply-settings-modal"></div>
+    <div class="app-modal__card app-modal__card--quick-replies">
+      <div class="app-modal__header">
+        <div><strong>Быстрые ответы</strong><span>Введите команду в строке сообщения, чтобы быстро подставить готовый текст.</span></div>
+        <button type="button" class="icon-btn" data-close-modal="quick-reply-settings-modal" aria-label="Закрыть"><i class="material-icons">close</i></button>
+      </div>
+      <div id="quick-reply-settings-list" class="quick-reply-settings-list"></div>
+      <button type="button" id="quick-reply-add-btn" class="quick-reply-add-button"><i class="material-icons">add</i><span>Добавить быстрый ответ</span></button>
+      <form id="quick-reply-editor" class="quick-reply-editor" hidden>
+        <div class="quick-reply-editor-title" id="quick-reply-editor-title">Новый быстрый ответ</div>
+        <label class="form-field"><span>Команда</span><input type="text" id="quick-reply-command" maxlength="32" placeholder="/info" autocomplete="off" required><small>Латинские буквы, цифры и _; слэш добавится автоматически.</small></label>
+        <label class="form-field"><span>Текст ответа</span><textarea id="quick-reply-text" rows="6" maxlength="4000" placeholder="Введите готовый текст сообщения" required></textarea></label>
+        <div id="quick-reply-form-error" class="quick-reply-form-error" hidden></div>
+        <div class="app-modal__actions"><button type="button" id="quick-reply-editor-cancel" class="secondary-button">Отмена</button><button type="submit" class="primary-button">Сохранить</button></div>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+<script src="{% static 'frontend/app.js' %}?v=20260828-quick-replies-1"></script>
 </body>
 
 </html>

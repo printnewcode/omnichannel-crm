@@ -5,7 +5,7 @@ from rest_framework import serializers
 from django.utils import timezone
 from .models import (
     TelegramAccount, Chat, Message, Operator, ChatAssignment, HistoryImportJob,
-    AISettings,
+    AISettings, QuickReply,
 )
 
 
@@ -393,3 +393,35 @@ class AISettingsSerializer(serializers.ModelSerializer):
         if not 1 <= value <= 1440:
             raise serializers.ValidationError('Допустимое значение: от 1 до 1440 минут.')
         return value
+
+
+class QuickReplySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuickReply
+        fields = ['id', 'command', 'text', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_command(self, value):
+        import re
+
+        command = str(value or '').strip().lower()
+        if command and not command.startswith('/'):
+            command = f'/{command}'
+        if not re.fullmatch(r'/[a-z0-9_]{1,30}', command):
+            raise serializers.ValidationError(
+                'Используйте от 1 до 30 латинских букв, цифр или символов подчёркивания после /.'
+            )
+        queryset = QuickReply.objects.filter(command=command)
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError('Такая команда уже существует.')
+        return command
+
+    def validate_text(self, value):
+        text = str(value or '').strip()
+        if not text:
+            raise serializers.ValidationError('Введите текст быстрого ответа.')
+        if len(text) > 4000:
+            raise serializers.ValidationError('Текст быстрого ответа не может быть длиннее 4000 символов.')
+        return text

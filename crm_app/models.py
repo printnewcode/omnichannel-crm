@@ -660,6 +660,31 @@ class GoogleContact(models.Model):
         verbose_name_plural = 'Контакты Google'
 
 
+class QuickReply(models.Model):
+    """A reusable operator reply shared by every messenger composer."""
+
+    command = models.CharField(max_length=32, unique=True, db_index=True, verbose_name='Команда')
+    text = models.TextField(verbose_name='Текст ответа')
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='quick_replies',
+        verbose_name='Создал',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['command']
+        verbose_name = 'Быстрый ответ'
+        verbose_name_plural = 'Быстрые ответы'
+
+    def __str__(self):
+        return self.command
+
+
 class HistoryImportJob(models.Model):
     """Progress record for provider history imports executed by Celery."""
 

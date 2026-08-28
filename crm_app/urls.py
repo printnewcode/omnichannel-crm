@@ -10,6 +10,7 @@ from .views import (
     , AISettingsView, AIPresenceView, AIOnlineOverrideView, AIGlobalModeView,
     GoogleContactsStatusView, GoogleContactsConnectView,
     GoogleContactsCallbackView, GoogleContactsSyncView,
+    QuickReplyViewSet,
 )
 from .integration_views import JgetQuestionWebhookView, MaxWebhookView, WhatsAppWebhookView
 
@@ -18,6 +19,7 @@ router.register(r'accounts', TelegramAccountViewSet, basename='telegram-account'
 router.register(r'chats', ChatViewSet, basename='chat')
 router.register(r'messages', MessageViewSet, basename='message')
 router.register(r'history-imports', HistoryImportJobViewSet, basename='history-import')
+router.register(r'quick-replies', QuickReplyViewSet, basename='quick-reply')
 
 urlpatterns = [
     path('api/', include(router.urls)),
