@@ -1,7 +1,6 @@
 """
 Celery задачи для асинхронной обработки медиа и сообщений
 """
-
 import os
 import logging
 from celery import shared_task
@@ -29,13 +28,13 @@ def process_incoming_message(
     from_user_username: Optional[str] = None,
     is_outgoing: bool = False,
     reply_to_message_id: Optional[int] = None,
-    message_type: str = "text",
+    message_type: str = 'text',
     media_file_id: Optional[str] = None,
-    media_caption: Optional[str] = None,
+    media_caption: Optional[str] = None
 ):
     """
     Обработка входящего сообщения и сохранение в БД
-
+    
     Args:
         account_id: ID аккаунта
         chat_id: ID чата (из БД)
@@ -58,82 +57,75 @@ def process_incoming_message(
         except Chat.DoesNotExist:
             logger.error(f"Chat {chat_id} not found")
             return
-
+        
         # Поиск сообщения на которое отвечают
         reply_to_message = None
         if reply_to_message_id:
             try:
                 reply_to_message = Message.objects.get(
-                    telegram_id=reply_to_message_id, chat=chat
+                    telegram_id=reply_to_message_id,
+                    chat=chat
                 )
             except Message.DoesNotExist:
                 logger.warning(f"Reply to message {reply_to_message_id} not found")
-
+        
         # Парсинг даты
         from datetime import datetime
-
         try:
-            message_date = datetime.fromisoformat(telegram_date.replace("Z", "+00:00"))
+            message_date = datetime.fromisoformat(telegram_date.replace('Z', '+00:00'))
             if message_date.tzinfo is None:
                 message_date = timezone.make_aware(message_date)
         except Exception as e:
             logger.warning(f"Error parsing date {telegram_date}: {e}")
             message_date = timezone.now()
-
+        
         # Создание или обновление сообщения
         message, created = Message.objects.get_or_create(
             telegram_id=telegram_message_id,
             chat=chat,
             defaults={
-                "text": text or media_caption,
-                "message_type": message_type,
-                "status": Message.MessageStatus.RECEIVED,
-                "from_user_id": from_user_id,
-                "from_user_name": from_user_name,
-                "from_user_username": from_user_username,
-                "is_outgoing": is_outgoing,
-                "telegram_date": message_date,
-                "reply_to_message": reply_to_message,
-                "media_file_id": media_file_id,
-                "media_caption": media_caption,
-                "metadata": {},
-            },
+                'text': text or media_caption,
+                'message_type': message_type,
+                'status': Message.MessageStatus.RECEIVED,
+                'from_user_id': from_user_id,
+                'from_user_name': from_user_name,
+                'from_user_username': from_user_username,
+                'is_outgoing': is_outgoing,
+                'telegram_date': message_date,
+                'reply_to_message': reply_to_message,
+                'media_file_id': media_file_id,
+                'media_caption': media_caption,
+                'metadata': {}
+            }
         )
-
+        
         # Если сообщение уже существует, обновляем его
         if not created:
             message.text = text or media_caption or message.text
             message.message_type = message_type
             message.telegram_date = message_date
             message.save()
-
+        
         # Если есть медиа, запускаем задачу на скачивание
         if created:
-            if is_outgoing:
-                Chat.objects.filter(pk=chat.pk).update(
-                    message_count=F("message_count") + 1,
-                    unread_count=0,
-                    last_message_at=message.telegram_date,
-                )
-            else:
-                Chat.objects.filter(pk=chat.pk).update(
-                    message_count=F('message_count') + 1,
-                    unread_count=F('unread_count') + 1,
-                    last_message_at=message.telegram_date
-                )
+            Chat.objects.filter(pk=chat.pk).update(
+                message_count=F('message_count') + 1,
+                unread_count=F('unread_count') + (0 if is_outgoing else 1),
+                last_message_at=message.telegram_date,
+            )
 
         publish_message(message.id)
-        if media_file_id and message_type in ["photo", "video", "voice", "document"]:
+        if media_file_id and message_type in ['photo', 'video', 'voice', 'document']:
             download_media.delay(
                 account_id=account_id,
                 message_id=message.id,
                 media_file_id=media_file_id,
-                message_type=message_type,
+                message_type=message_type
             )
-
+        
         logger.info(f"Processed message {telegram_message_id} for chat {chat_id}")
         return message.id
-
+        
     except Exception as e:
         logger.exception(f"Error processing incoming message: {e}")
         # Retry при ошибке
@@ -142,11 +134,15 @@ def process_incoming_message(
 
 @shared_task(bind=True, max_retries=3)
 def download_media(
-    self, account_id: int, message_id: int, media_file_id: str, message_type: str
+    self,
+    account_id: int,
+    message_id: int,
+    media_file_id: str,
+    message_type: str
 ):
     """
     Скачать медиа файл из Telegram и сохранить локально
-
+    
     Args:
         account_id: ID аккаунта
         message_id: ID сообщения в БД
@@ -160,74 +156,70 @@ def download_media(
         except Message.DoesNotExist:
             logger.error(f"Message {message_id} not found")
             return
-
+        
         # Получение аккаунта
         try:
             account = TelegramAccount.objects.get(id=account_id)
         except TelegramAccount.DoesNotExist:
             logger.error(f"Account {account_id} not found")
             return
-
+        
         # Создание директории для медиа
-        media_dir = settings.BASE_DIR / "media" / "telegram" / message_type
+        media_dir = settings.BASE_DIR / 'media' / 'telegram' / message_type
         os.makedirs(media_dir, exist_ok=True)
-
+        
         # Для Bot API используем getFile метод
         if account.account_type == TelegramAccount.AccountType.BOT:
             if not account.bot_token:
                 logger.error(f"No bot token for account {account_id}")
                 return
-
+            
             # Получение информации о файле
             base_url = f"https://api.telegram.org/bot{account.bot_token}"
             file_info_url = f"{base_url}/getFile?file_id={media_file_id}"
             response = requests.get(file_info_url)
-
+            
             if response.status_code != 200:
                 logger.error(f"Failed to get file info: {response.status_code}")
                 return
-
+            
             file_info = response.json()
-            if not file_info.get("ok"):
+            if not file_info.get('ok'):
                 logger.error(f"Bot API error: {file_info.get('description')}")
                 return
-
-            file_path = file_info["result"]["file_path"]
-            file_url = (
-                f"https://api.telegram.org/file/bot{account.bot_token}/{file_path}"
-            )
-
+            
+            file_path = file_info['result']['file_path']
+            file_url = f"https://api.telegram.org/file/bot{account.bot_token}/{file_path}"
+            
             # Определение расширения файла
-            file_ext = os.path.splitext(file_path)[1] or ".bin"
-
+            file_ext = os.path.splitext(file_path)[1] or '.bin'
+            
             # Скачивание файла
             file_response = requests.get(file_url, stream=True)
             if file_response.status_code == 200:
                 # Сохранение файла
                 local_filename = f"{message_id}_{media_file_id[:10]}{file_ext}"
                 local_path = media_dir / local_filename
-
-                with open(local_path, "wb") as f:
+                
+                with open(local_path, 'wb') as f:
                     for chunk in file_response.iter_content(chunk_size=8192):
                         f.write(chunk)
-
+                
                 # Обновление сообщения
                 message.media_file_path = str(local_path.relative_to(settings.BASE_DIR))
-                message.save(update_fields=["media_file_path"])
-
+                message.save(update_fields=['media_file_path'])
+                
                 logger.info(f"Downloaded media for message {message_id}: {local_path}")
             else:
                 logger.error(f"Failed to download media: {file_response.status_code}")
                 return
-
+        
         # Для Telethon используем async загрузку через клиент
         # Это будет обработано в обработчике сообщений
         elif account.account_type == TelegramAccount.AccountType.PERSONAL:
-            logger.warning(
-                "Media download for Telethon should be handled in message handler"
-            )
+            logger.warning("Media download for Telethon should be handled in message handler")
             # TODO: Реализовать загрузку через Telethon клиент
-
+        
     except Exception as e:
         logger.exception(f"Error downloading media: {e}")
         raise self.retry(exc=e, countdown=60)
@@ -239,26 +231,18 @@ def download_green_api_media_task(self, message_id: int):
     from .services.provider_media import download_green_api_media
 
     try:
-        message = Message.objects.select_related("chat__telegram_account").get(
-            id=message_id
-        )
-        if message.chat.telegram_account.account_type not in {
-            TelegramAccount.AccountType.WHATSAPP,
-            TelegramAccount.AccountType.MAX,
-        }:
+        message = Message.objects.select_related('chat__telegram_account').get(id=message_id)
+        if message.chat.telegram_account.account_type not in {TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX}:
             return None
         result = download_green_api_media(message)
         publish_message(message.id)
         return result
     except Message.DoesNotExist:
-        logger.warning("GREEN-API media message %s no longer exists", message_id)
+        logger.warning('GREEN-API media message %s no longer exists', message_id)
         return None
     except Exception as exc:
-        logger.exception(
-            "Could not download GREEN-API media for message %s", message_id
-        )
-        raise self.retry(exc=exc, countdown=min(300, 15 * (2**self.request.retries)))
-
+        logger.exception('Could not download GREEN-API media for message %s', message_id)
+        raise self.retry(exc=exc, countdown=min(300, 15 * (2 ** self.request.retries)))
 
 @shared_task
 def cleanup_old_messages():
@@ -268,13 +252,14 @@ def cleanup_old_messages():
     """
     from django.utils import timezone
     from datetime import timedelta
-
+    
     # Удаление сообщений старше 90 дней
     cutoff_date = timezone.now() - timedelta(days=90)
-
+    
     deleted_count, _ = Message.objects.filter(
-        telegram_date__lt=cutoff_date, message_type="text"
+        telegram_date__lt=cutoff_date,
+        message_type='text'
     ).delete()
-
+    
     logger.info(f"Cleaned up {deleted_count} old messages")
     return deleted_count

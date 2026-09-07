@@ -20,7 +20,7 @@ def publish_message(message_id: int) -> None:
         close_old_connections()
     try:
         message = Message.objects.select_related('chat', 'chat__telegram_account').get(pk=message_id)
-        if message.chat.chat_type != Chat.ChatType.CHANNEL or message.chat.is_bot:
+        if message.chat.chat_type != Chat.ChatType.PRIVATE or message.chat.is_bot:
             return
         layer = get_channel_layer()
         async_to_sync(layer.group_send)(CRM_OPERATORS_GROUP, {

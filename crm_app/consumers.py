@@ -52,28 +52,23 @@ class MessageConsumer(AsyncWebsocketConsumer):
     def _active_chats():
         queryset = Chat.objects.filter(
             is_archived=False,
+            chat_type=Chat.ChatType.PRIVATE,
             is_bot=False,
-        ).exclude(chat_type=Chat.ChatType.CHANNEL).select_related('telegram_account').order_by('-last_message_at')[:200]
+        ).select_related('telegram_account').order_by('-last_message_at')[:200]
         return ChatSerializer(queryset, many=True).data
 
     @staticmethod
     def _chat_messages(chat_id):
-        queryset = (
-            Message.objects.filter(
-                chat_id=chat_id,
-                chat__is_bot=False,
-            )
-            .exclude(chat_type=Chat.ChatType.CHANNEL)
-            .select_related("reply_to_message")
-            .order_by("telegram_date")[:100]
-        )
+        queryset = Message.objects.filter(
+            chat_id=chat_id,
+            chat__chat_type=Chat.ChatType.PRIVATE,
+            chat__is_bot=False,
+        ).select_related('reply_to_message').order_by('telegram_date')[:100]
         return MessageSerializer(queryset, many=True).data
 
     @staticmethod
     def _mark_read(chat_id):
-        Chat.objects.filter(pk=chat_id, is_bot=False).exclude(
-            chat_type=Chat.ChatType.CHANNEL
-        ).update(unread_count=0)
+        Chat.objects.filter(pk=chat_id, chat_type=Chat.ChatType.PRIVATE, is_bot=False).update(unread_count=0)
 
     async def new_message(self, event):
         await self.send(text_data=json.dumps({'type': 'new_message', 'message': event['message']}))
