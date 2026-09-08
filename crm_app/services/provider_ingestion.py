@@ -103,11 +103,16 @@ def ingest_provider_message(
         },
     )
     if created:
-        Chat.objects.filter(pk=chat.pk).update(
-            message_count=F('message_count') + 1,
-            unread_count=F('unread_count') + (0 if is_outgoing else 1),
-            last_message_at=event_time,
-        )
+        update_kwargs = {
+            'message_count': F('message_count') + 1,
+            'last_massage_at': event_time,
+        }
+        if is_outgoing:
+            update_kwargs['unread_count'] = 0
+        else:
+            update_kwargs['unread_count'] = F('unread_count') + 1
+
+        Chat.objects.filter(pk=chat.pk).update(**update_kwargs)
     elif update_existing:
         message.text = text or None
         message.message_type = message_type

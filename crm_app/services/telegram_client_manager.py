@@ -649,6 +649,8 @@ class TelegramClientManager:
                     chat.last_message_at = message.date
                     if not message.out:
                         chat.unread_count += 1
+                    else:
+                        chat.unread_count = 0
                     chat.save(update_fields=['message_count', 'last_message_at', 'unread_count'])
 
                 if message_created:

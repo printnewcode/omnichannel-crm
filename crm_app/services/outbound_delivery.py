@@ -166,6 +166,7 @@ def process_next_delivery():
         if getattr(message, '_outbox_was_created', True):
             Chat.objects.filter(pk=delivery.chat_id).update(
                 message_count=F('message_count') + 1,
+                unread_count=0,
                 last_message_at=message.telegram_date,
             )
         OutboundDelivery.objects.filter(pk=delivery.pk).update(

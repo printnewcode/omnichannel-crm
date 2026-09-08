@@ -601,18 +601,42 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
 
     def _visible_chats(self):
         """Apply cheap list filters before previews and pagination are built."""
-        queryset = Chat.objects.select_related('telegram_account', 'google_contact').filter(
-            chat_type=Chat.ChatType.PRIVATE,
-            is_bot=False,
-        ).only(
-            'id', 'telegram_id', 'telegram_account_id', 'chat_type', 'title',
-            'username', 'first_name', 'last_name', 'message_count',
-            'unread_count', 'created_at', 'updated_at', 'last_message_at',
-            'is_archived', 'is_bot', 'telegram_account__id',
-            'telegram_account__name', 'telegram_account__account_type',
-            'telegram_account__status',
-            'google_contact_id', 'google_contact__display_name',
-            'needs_human_attention', 'ai_paused_until', 'ai_disabled',
+        queryset = (
+            Chat.objects.select_related("telegram_account", "google_contact")
+            .filter(
+                chat_type__in=[
+                    Chat.ChatType.PRIVATE,
+                    Chat.ChatType.GROUP,
+                    Chat.ChatType.SUPERGROUP
+                ],
+                is_bot=False,
+            )
+            .only(
+                "id",
+                "telegram_id",
+                "telegram_account_id",
+                "chat_type",
+                "title",
+                "username",
+                "first_name",
+                "last_name",
+                "message_count",
+                "unread_count",
+                "created_at",
+                "updated_at",
+                "last_message_at",
+                "is_archived",
+                "is_bot",
+                "telegram_account__id",
+                "telegram_account__name",
+                "telegram_account__account_type",
+                "telegram_account__status",
+                "google_contact_id",
+                "google_contact__display_name",
+                "needs_human_attention",
+                "ai_paused_until",
+                "ai_disabled",
+            )
         )
         messenger = self.request.query_params.get('messenger', 'all').strip().lower()
         account_types = {
@@ -1023,7 +1047,7 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return Message.objects.filter(
-            chat__chat_type=Chat.ChatType.PRIVATE,
+            chat__chat_type__in=[Chat.ChatType.PRIVATE, Chat.ChatType.GROUP, Chat.ChatType.SUPERGROUP],
             chat__is_bot=False,
         ).annotate(
             api_provider_status=KeyTextTransform('provider_status', 'metadata'),

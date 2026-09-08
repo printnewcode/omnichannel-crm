@@ -85,26 +85,25 @@ class SharedConversationQueueTests(TestCase):
         self.assertContains(response, 'id="archive-toggle"')
         self.assertContains(response, 'id="reply-composer"')
         self.assertContains(response, 'id="chat-context-menu"')
-    def test_group_chats_and_messages_are_hidden_from_web_api(self):
+
+    def test_group_chats_and_messages_are_visible_in_web_api(self):
         group = Chat.objects.create(
             telegram_id=88003,
             telegram_account=self.account,
             chat_type=Chat.ChatType.GROUP,
-            title='Hidden group',
+            title='Visible group',
+            last_message_at = timezone.now(),
         )
         group_message = Message.objects.create(
             chat=group,
             telegram_id=992,
-            text='Stored but hidden',
+            text='Stored and visible',
             telegram_date=timezone.now(),
         )
 
         chats = self.client.get(reverse('chat-list')).json()['results']
-        self.assertNotIn(group.id, [item['id'] for item in chats])
-        self.assertEqual(
-            self.client.get(reverse('message-detail', kwargs={'pk': group_message.pk})).status_code,
-            404,
-        )
+        self.assertIn(group.id, [item['id'] for item in chats])
+        self.assertEqual(reverse('message-detail', kwargs={'pk': group_message.pk}).status_code, 200)
 
     def test_bot_chats_and_messages_are_hidden_from_web_api(self):
         bot_chat = Chat.objects.create(
