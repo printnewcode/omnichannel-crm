@@ -1374,6 +1374,12 @@ const setActiveChat = (chat) => {
   setComposerEnabled(Boolean(chat) && isChatInCurrentScope(chat));
   const historyButton = document.getElementById('import-history-btn');
   if (historyButton) historyButton.hidden = !chat || getAccountType(chat) === 'bot';
+  const addMemberBtn = document.getElementById('add-member-btn');
+  if (addMemberBtn) {
+    const isGroup = chat && (chat.chat_type === 'group' || chat.chat_type === 'supergroup');
+    const isPersonal = chat && getAccountType(chat) === 'personal';
+    addMemberBtn.hidden = !(isGroup && isPersonal);
+  }
   const aiStatus = document.getElementById('chat-ai-status');
   if (aiStatus) {
     const aiState = getEffectiveChatAIState(chat);
@@ -1878,6 +1884,37 @@ document.addEventListener("DOMContentLoaded", () => {
       showNotification('Загрузка началась', loadAll ? 'Загружаем всю доступную историю в фоне.' : `Загружаем до ${count} сообщений в фоне.`, 5000);
       monitorImportJobs([job.id], 'history');
     } catch (error) { setError(error.message); }
+  });
+
+  // Логика окна добавления участника
+  document.getElementById('add-member-btn')?.addEventListener('click', () => {
+    document.getElementById('add-member-input').value = '';
+    openModal('add-member-modal');
+    setTimeout(() => document.getElementById('add-member-input')?.focus(), 100);
+  });
+
+  document.getElementById('add-member-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!currentChatId) return;
+
+    const input = document.getElementById('add-member-input');
+    const submitBtn = document.getElementById('add-member-submit');
+    const userValue = input.value.trim();
+    if (!userValue) return;
+
+    submitBtn.disabled = true;
+    try {
+      await request(`${apiBase}/chats/${currentChatId}/add_members/`, {
+        method: 'POST',
+        body: JSON.stringify({ users: [userValue] })
+      });
+      closeModal('add-member-modal');
+      showNotification('Успешно', `Пользователь ${userValue} добавлен в группу.`);
+    } catch (error) {
+      setError(error.message || 'Не удалось добавить участника.');
+    } finally {
+      submitBtn.disabled = false;
+    }
   });
 
   document.getElementById('import-chats-form')?.addEventListener('submit', async (event) => {

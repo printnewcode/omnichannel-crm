@@ -1204,6 +1204,8 @@ body, .sidebar, .main-chat, .chat-header, .chat-input-area, .search-bar,
 
 .header-icon-button:hover { color: var(--accent); }
 
+.header-icon-button[hidden] { display: none;}
+
 .messenger-switcher {
   margin: 4px 12px 8px;
   padding: 5px;

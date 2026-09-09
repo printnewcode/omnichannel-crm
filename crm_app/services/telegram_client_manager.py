@@ -23,6 +23,8 @@ from channels.db import database_sync_to_async
 from telethon import TelegramClient, events, functions, types, utils
 from telethon.network.connection.tcpobfuscated import ConnectionTcpObfuscated
 from telethon.sessions import StringSession
+from telethon.tl.functions.channels import InviteToChannelRequest
+from telethon.tl.functions.messages import AddChatUserRequest
 from telethon.errors import (
     FloodWaitError,
     RPCError,
@@ -2364,3 +2366,52 @@ class TelegramClientManager:
                     await self.start_client(account)
             except Exception as e:
                 logger.error(f"Failed to reconcile account {account.id}: {e}")
+
+    async def add_chat_members(self, account_id: int, chat_id: int, users_to_add: list) -> dict:
+        """
+        Добавить пользователей в группу или супергруппу.
+        users_to_add может содержать username ('@username') или номера телефонов.
+        """
+
+        client = self._clients.get(account_id)
+        if not client:
+            return {'success': False, 'error': 'Клиент не запущен. Проверьте подключение аккаунта.'}
+
+        try:
+            # Получаем сущность чата
+            chat_entity = await client.get_entity(chat_id)
+            
+            resolved_users = []
+            for u in users_to_add:
+                try:
+                    # Пытаемся распознать пользователя
+                    resolved_users.append(await client.get_input_entity(u))
+                except Exception as e:
+                    logger.warning(f"Не удалось найти пользователя {u}: {e}")
+
+            if not resolved_users:
+                return {'success': False, 'error': 'Не удалось найти указанных пользователей в Telegram.'}
+
+            # Проверяем тип группы: супергруппа/канал или обычная группа
+            if getattr(chat_entity, 'broadcast', False) or getattr(chat_entity, 'megagroup', False):
+                await client(InviteToChannelRequest(
+                    channel=chat_entity,
+                    users=resolved_users
+                ))
+            else:
+                # В обычные группы пользователей добавляем по одному
+                for user in resolved_users:
+                    await client(AddChatUserRequest(
+                        chat_id=chat_entity.id,
+                        user_id=user,
+                        fwd_limit=50  # Даем доступ к последним 50 сообщениям истории
+                    ))
+
+            return {'success': True}
+
+        except RPCError as e:
+            logger.error(f"Telegram RPC error adding members: {e}")
+            return {'success': False, 'error': f'Ошибка Telegram: {str(e)}'}
+        except Exception as e:
+            logger.exception(f"Error adding members to chat {chat_id}: {e}")
+            return {'success': False, 'error': 'Внутренняя ошибка при добавлении.'}

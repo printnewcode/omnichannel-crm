@@ -6,7 +6,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Omnichannel CRM</title>
-  <link rel="stylesheet" href="{% static 'frontend/style.css' %}?v=20260828-quick-replies-1" />
+  <link rel="stylesheet" href="{% static 'frontend/style.css' %}" />
   <!-- Material Icons -->
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
@@ -93,6 +93,7 @@
         </div>
         <div class="chat-header-actions">
           <button type="button" class="chat-ai-status" id="chat-ai-status" hidden aria-label="Статус ИИ"><i class="material-icons">smart_toy</i></button>
+          <button type="button" class="header-icon-button" id="add-member-btn" hidden title="Добавить участника" aria-label="Добавить участника"><i class="material-icons">person_add</i></button>
           <button type="button" class="history-button" id="import-history-btn" hidden><i class="material-icons">history</i><span>Загрузить прошлые сообщения</span></button>
           <div id="message-search-container" class="message-search" hidden>
             <i class="material-icons" aria-hidden="true">search</i>
@@ -248,7 +249,26 @@
     </div>
   </div>
   {% endif %}
-<script src="{% static 'frontend/app.js' %}?v=20260828-quick-replies-1"></script>
+
+  <!-- Модальное окно добавления участника -->
+  <div id="add-member-modal" class="app-modal" hidden>
+    <div class="app-modal__backdrop" data-close-modal="add-member-modal"></div>
+    <form class="app-modal__card" id="add-member-form">
+      <div class="app-modal__header">
+        <div><strong>Добавить участника</strong><span>Введите номер телефона или @username</span></div>
+        <button type="button" class="icon-btn" data-close-modal="add-member-modal"><i class="material-icons">close</i></button>
+      </div>
+      <label class="form-field">
+        <span>Пользователь</span>
+        <input type="text" id="add-member-input" placeholder="+79991234567 или @username" required autocomplete="off">
+      </label>
+      <div class="app-modal__actions">
+        <button type="button" class="secondary-button" data-close-modal="add-member-modal">Отмена</button>
+        <button type="submit" class="primary-button" id="add-member-submit">Добавить</button>
+      </div>
+    </form>
+  </div>
+<script src="{% static 'frontend/app.js' %}"></script>
 </body>
 
 </html>

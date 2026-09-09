@@ -811,6 +811,59 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return Response(_delivery_response(deliveries), status=status.HTTP_202_ACCEPTED)
 
+    @action(detail=True, methods=["post"])
+    def add_members(self, request, pk=None):
+        """Эндпоинт для добавления участников в группу."""
+        chat = self.get_object()
+
+        # Разрешаем только для групп
+        if chat.chat_type not in {Chat.ChatType.GROUP, Chat.ChatType.SUPERGROUP}:
+            return Response(
+                {"error": "Добавление участников доступно только для групп."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        account = chat.telegram_account
+        if account.account_type != TelegramAccount.AccountType.PERSONAL:
+            return Response(
+                {
+                    "error": "Добавление в группы работает только для личных Telegram-аккаунтов."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        users = request.data.get("users")
+        if not users or not isinstance(users, list):
+            return Response(
+                {
+                    "error": 'Передайте список пользователей в поле "users" (например, номера телефонов или @username).'
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .services.telegram_client_manager import TelegramClientManager
+
+        manager = TelegramClientManager()
+
+        try:
+            # Запускаем асинхронный метод в синхронной View
+            result = manager.run_async_sync(
+                manager.add_chat_members(account.id, chat.telegram_id, users)
+            )
+
+            if result.get("success"):
+                return Response({"status": "success"})
+            else:
+                return Response(
+                    {"error": result.get("error")}, status=status.HTTP_400_BAD_REQUEST
+                )
+
+        except Exception as e:
+            logger.exception("Error in add_members API")
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 
 class AISettingsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
