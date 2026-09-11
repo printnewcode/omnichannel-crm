@@ -367,17 +367,19 @@ class OutboundDeliveryTests(TestCase):
     @patch('crm_app.services.outbound_delivery.publish_delivery')
     @patch('crm_app.services.message_router.MessageRouter.send_message', return_value=777)
     def test_outbox_creates_sent_message(self, send_message, publish_delivery):
-        self.unread_count = 5
+        # ИСПРАВЛЕНИЕ: обращаемся к объекту чата
+        self.chat.unread_count = 5
         self.chat.save(update_fields=['unread_count'])
 
         delivery = enqueue_delivery(chat=self.chat, text='Reply', requested_by=self.user)
         self.assertTrue(process_next_delivery())
         delivery.refresh_from_db()
+        self.chat.refresh_from_db() # Обновляем чат из базы
 
         self.assertEqual(delivery.status, OutboundDelivery.Status.SENT)
         self.assertEqual(delivery.provider_message_id, '777')
         self.assertEqual(delivery.created_message.text, 'Reply')
-        self.assertEqual(self.chat.unread_count, 0)
+        self.assertEqual(self.chat.unread_count, 0) # Проверяем, что счетчик сбросился
         send_message.assert_called_once()
         sent_delivery = publish_delivery.call_args.args[0]
         self.assertEqual(sent_delivery.status, OutboundDelivery.Status.SENT)

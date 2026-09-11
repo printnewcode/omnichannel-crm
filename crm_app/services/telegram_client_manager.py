@@ -569,7 +569,7 @@ class TelegramClientManager:
                     return chat, created
 
                 chat, chat_created = await get_or_create_chat()
-                if peer_phone and not chat_created:
+                if peer_phone:
                     from .google_contacts import match_chat_contact
                     await database_sync_to_async(match_chat_contact)(chat)
 

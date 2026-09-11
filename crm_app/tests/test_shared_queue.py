@@ -103,7 +103,12 @@ class SharedConversationQueueTests(TestCase):
 
         chats = self.client.get(reverse('chat-list')).json()['results']
         self.assertIn(group.id, [item['id'] for item in chats])
-        self.assertEqual(reverse('message-detail', kwargs={'pk': group_message.pk}).status_code, 200)
+        self.assertEqual(
+            self.client.get(
+                reverse("message-detail", kwargs={"pk": group_message.pk})
+            ).status_code,
+            200,
+        )
 
     def test_bot_chats_and_messages_are_hidden_from_web_api(self):
         bot_chat = Chat.objects.create(

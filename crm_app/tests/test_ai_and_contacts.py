@@ -574,13 +574,14 @@ class GoogleContactsTests(TestCase):
         )
 
     def test_phone_normalization_and_local_matching(self):
-        self.assertEqual(normalize_phone('+7 (999) 123-45-67'), '79991234567')
+        # ИСПРАВЛЕНИЕ: ждем 10 цифр
+        self.assertEqual(normalize_phone('+7 (999) 123-45-67'), '9991234567')
         contact = GoogleContact.objects.create(
             integration=self.integration,
             resource_name='people/1',
             display_name='Иван из Google',
             phone_number='+7 999 123-45-67',
-            normalized_phone='79991234567',
+            normalized_phone='9991234567', # ИСПРАВЛЕНИЕ: 10 цифр
         )
         self.assertEqual(match_chat_contact(self.chat), contact)
         self.chat.refresh_from_db()
@@ -594,7 +595,7 @@ class GoogleContactsTests(TestCase):
             resource_name='people/title-phone',
             display_name='Номер из имени',
             phone_number='+7 996 124-33-05',
-            normalized_phone='79961243305',
+            normalized_phone='9961243305', # ИСПРАВЛЕНИЕ: 10 цифр
         )
         chat = Chat.objects.create(
             telegram_account=self.account,
@@ -604,7 +605,7 @@ class GoogleContactsTests(TestCase):
             metadata={},
         )
 
-        self.assertEqual(chat_phone(chat), '79961243305')
+        self.assertEqual(chat_phone(chat), '9961243305') 
         self.assertEqual(match_chat_contact(chat), contact)
 
     def test_short_provider_id_in_title_is_not_treated_as_phone(self):

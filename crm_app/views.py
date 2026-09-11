@@ -1076,8 +1076,8 @@ class GoogleContactsSyncView(APIView):
         if integration.sync_in_progress and sync_is_fresh:
             return Response({'status': 'running'}, status=status.HTTP_202_ACCEPTED)
         integration.sync_in_progress = True
-        integration.last_error = ''
-        integration.save(update_fields=['sync_in_progress', 'last_error', 'updated_at'])
+        integration.last_error = ""
+        integration.save(update_fields=["sync_in_progress", "last_error", "updated_at"])
         from .tasks import sync_google_contacts_task
         sync_google_contacts_task.delay(integration.id)
         return Response({'status': 'queued'}, status=status.HTTP_202_ACCEPTED)

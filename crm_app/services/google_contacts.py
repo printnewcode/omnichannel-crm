@@ -7,6 +7,7 @@ import re
 from datetime import timedelta
 from urllib.parse import urlencode
 
+from hydrogram.filters import animation
 import requests
 from django.conf import settings
 from django.db import transaction
@@ -23,21 +24,19 @@ PEOPLE_URL = 'https://people.googleapis.com/v1'
 
 def normalize_phone(value) -> str:
     digits = re.sub(r'\D+', '', str(value or ''))
-    if len(digits) == 11 and digits.startswith('8'):
-        digits = '7' + digits[1:]
+    if len(digits) >= 10:
+        return digits[-10:]
     return digits
 
 
 def phone_from_text(value) -> str:
     """Extract a phone-looking value from a human-visible chat name."""
-    text = str(value or '')
-    for candidate in re.findall(r'(?<!\d)(?:\+?\d[\d\s().-]{9,}\d)(?!\d)', text):
+    text = str(value or "")
+    for candidate in re.findall(r"(?<!\d)(?:\+?\d[\d\s().-]{9,}\d)(?!\d)", text):
         normalized = normalize_phone(candidate)
-        # Plain provider/user IDs are common in chat names. Requiring at least
-        # 11 digits avoids treating most short Telegram/MAX IDs as phones.
-        if 11 <= len(normalized) <= 15:
+        if 10 <= len(normalized) <= 15:
             return normalized
-    return ''
+    return ""
 
 
 def chat_phone(chat: Chat) -> str:
@@ -140,10 +139,18 @@ def access_token(integration: GoogleContactsIntegration) -> str:
 
 def _display_name(person: dict) -> str:
     names = person.get('names') or []
-    if not names:
-        return ''
-    primary = next((item for item in names if (item.get('metadata') or {}).get('primary')), names[0])
-    return str(primary.get('displayName') or '').strip()
+    if names:
+        primary = next((item for item in names if (item.get('metadata') or {}).get('primary')), names[0])
+        name_str = str(primary.get('displayName') or '').strip()
+        if name_str:
+            return name_str
+    
+    orgs = person.get('organizations') or []
+    if orgs:
+        primary = next((item for item in orgs if (item.get('metadata') or {}).get('primary')), orgs[0])
+        return str(primary.get('name') or '').strip()
+    
+    return ''
 
 
 def sync_contacts(integration_id: int) -> dict:
@@ -151,7 +158,7 @@ def sync_contacts(integration_id: int) -> dict:
     token = access_token(integration)
     headers = {'Authorization': f'Bearer {token}'}
     params = {
-        'personFields': 'metadata,names,phoneNumbers',
+        'personFields': 'metadata,names,organizations,phoneNumbers',
         'pageSize': 1000,
         'requestSyncToken': 'true',
     }

@@ -105,7 +105,7 @@ def ingest_provider_message(
     if created:
         update_kwargs = {
             'message_count': F('message_count') + 1,
-            'last_massage_at': event_time,
+            'last_message_at': event_time,
         }
         if is_outgoing:
             update_kwargs['unread_count'] = 0
@@ -129,7 +129,7 @@ def ingest_provider_message(
 
     if publish:
         transaction.on_commit(lambda message_id=message.id: publish_message(message_id))
-    if contact_phone and not chat_created:
+    if contact_phone:
         from .google_contacts import match_chat_contact
         transaction.on_commit(lambda chat_id=chat.id: match_chat_contact(Chat.objects.get(pk=chat_id)))
     return message, created, chat_created
