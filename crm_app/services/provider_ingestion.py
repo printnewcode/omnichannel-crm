@@ -20,6 +20,7 @@ def ingest_provider_message(
     text='',
     sender_id=None,
     sender_name=None,
+    contact_phone=None,
     username=None,
     occurred_at=None,
     message_type=Message.MessageType.TEXT,
@@ -28,6 +29,10 @@ def ingest_provider_message(
     metadata=None,
     chat_type=Chat.ChatType.PRIVATE,
     is_bot=False,
+    is_outgoing=False,
+    status=Message.MessageStatus.RECEIVED,
+    publish=True,
+    update_existing=False,
 ):
     raw_chat_id = str(external_chat_id)
     base_chat_id = raw_chat_id.split('@', 1)[0]
@@ -43,7 +48,11 @@ def ingest_provider_message(
             'title': sender_name or str(external_chat_id),
             'username': username,
             'first_name': sender_name,
-            'metadata': {'provider': account.account_type, 'external_chat_id': raw_chat_id},
+            'metadata': {
+                'provider': account.account_type,
+                'external_chat_id': raw_chat_id,
+                **({'contact_phone': str(contact_phone)} if contact_phone else {}),
+            },
             'is_bot': bool(is_bot),
         },
     )
@@ -57,6 +66,11 @@ def ingest_provider_message(
     if chat.is_bot != bool(is_bot):
         chat.is_bot = bool(is_bot)
         chat_updates.append('is_bot')
+    if contact_phone:
+        chat_metadata = chat.metadata if isinstance(chat.metadata, dict) else {}
+        if str(chat_metadata.get('contact_phone') or '') != str(contact_phone):
+            chat.metadata = {**chat_metadata, 'contact_phone': str(contact_phone)}
+            chat_updates.append('metadata')
     if chat_updates:
         chat.save(update_fields=[*chat_updates, 'updated_at'])
 
@@ -74,14 +88,14 @@ def ingest_provider_message(
             'telegram_id': None,
             'text': text or None,
             'message_type': message_type,
-            'status': Message.MessageStatus.RECEIVED,
+            'status': status,
             'from_user_id': (
                 int(str(sender_id).split('@', 1)[0])
                 if sender_id and str(sender_id).split('@', 1)[0].isdigit() else None
             ),
             'from_user_name': sender_name,
             'from_user_username': username,
-            'is_outgoing': False,
+            'is_outgoing': is_outgoing,
             'telegram_date': event_time,
             'media_file_id': media_file_id,
             'reply_to_message': reply_to_message,
@@ -89,11 +103,33 @@ def ingest_provider_message(
         },
     )
     if created:
-        Chat.objects.filter(pk=chat.pk).update(
-            message_count=F('message_count') + 1,
-            unread_count=F('unread_count') + 1,
-            last_message_at=event_time,
-        )
+        update_kwargs = {
+            'message_count': F('message_count') + 1,
+            'last_message_at': event_time,
+        }
+        if is_outgoing:
+            update_kwargs['unread_count'] = 0
+        else:
+            update_kwargs['unread_count'] = F('unread_count') + 1
 
-    transaction.on_commit(lambda message_id=message.id: publish_message(message_id))
+        Chat.objects.filter(pk=chat.pk).update(**update_kwargs)
+    elif update_existing:
+        message.text = text or None
+        message.message_type = message_type
+        message.metadata = {
+            **(message.metadata if isinstance(message.metadata, dict) else {}),
+            'provider': account.account_type,
+            **(metadata or {}),
+        }
+        update_fields = ['text', 'message_type', 'metadata', 'updated_at']
+        if media_file_id is not None:
+            message.media_file_id = media_file_id
+            update_fields.append('media_file_id')
+        message.save(update_fields=update_fields)
+
+    if publish:
+        transaction.on_commit(lambda message_id=message.id: publish_message(message_id))
+    if contact_phone:
+        from .google_contacts import match_chat_contact
+        transaction.on_commit(lambda chat_id=chat.id: match_chat_contact(Chat.objects.get(pk=chat_id)))
     return message, created, chat_created

@@ -6,14 +6,18 @@ import errno
 import logging
 import os
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.db import transaction
-from django.db.models import Q
+from rest_framework.pagination import PageNumberPagination
+from django.db import connection, transaction
+from django.db.models import Count, OuterRef, Q, Subquery
+from django.db.models.fields.json import KeyTextTransform, KeyTransform
+from django.db.models.functions import Coalesce, Substr
 from django.utils import timezone
 from django.conf import settings
 from django.core.files.storage import default_storage
@@ -21,17 +25,21 @@ from django.core.files.base import ContentFile
 from django.core.exceptions import SuspiciousFileOperation
 from django.utils.text import get_valid_filename
 from django.shortcuts import redirect
+from django.core import signing
+from django.urls import reverse
 from .models import (
-    TelegramAccount, Chat, Message
+    TelegramAccount, Chat, Message, HistoryImportJob, AISettings,
+    OperatorPresenceSession, GoogleContactsIntegration, ChatAIState, QuickReply,
 )
 from .serializers import (
     TelegramAccountSerializer, ChatSerializer, MessageSerializer,
-    SendMessageSerializer
+    SendMessageSerializer, HistoryImportJobSerializer
+    , AISettingsSerializer, QuickReplySerializer
 )
 from .services.telegram_client_manager import TelegramClientManager
 from .services.message_router import MessageRouter
 from .services.health_monitor import HealthMonitor
-from .tasks import process_incoming_message
+from .tasks import download_telegram_media_task, process_incoming_message
 
 logger = logging.getLogger(__name__)
 
@@ -39,18 +47,52 @@ MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_ATTACHMENTS_PER_MESSAGE = 10
 
 
-def _enqueue_message_batch(*, chat, text, media_paths, requested_by, reply_to_message=None):
+class QuickReplyViewSet(viewsets.ModelViewSet):
+    """Staff-managed reusable replies for the provider-neutral composer."""
+
+    queryset = QuickReply.objects.select_related('created_by').all()
+    serializer_class = QuickReplySerializer
+    permission_classes = [permissions.IsAdminUser]
+    pagination_class = None
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+
+class MessagePagination(PageNumberPagination):
+    """Allow an explicit, bounded history window for user-requested imports."""
+
+    page_size = 100
+    page_size_query_param = 'page_size'
+    max_page_size = 10000
+
+
+class ChatPagination(PageNumberPagination):
+    """Serve the conversation list in moderate chunks for the small VPS."""
+
+    page_size = 50
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+def _enqueue_message_batch(
+    *, chat, text, media_paths, requested_by, reply_to_message=None,
+    idempotency_key=None,
+):
     """Create one provider-neutral batch; providers consume each attachment reliably."""
     from .services.outbound_delivery import enqueue_delivery
 
     paths = list(media_paths or [])
     with transaction.atomic():
+        from .services.ai_assistant import pause_chat_for_operator
+        pause_chat_for_operator(chat.id)
         if not paths:
             return [enqueue_delivery(
                 chat=chat,
                 text=text,
                 reply_to_message=reply_to_message,
                 requested_by=requested_by,
+                idempotency_key=idempotency_key,
             )]
         return [
             enqueue_delivery(
@@ -59,6 +101,10 @@ def _enqueue_message_batch(*, chat, text, media_paths, requested_by, reply_to_me
                 media_path=media_path,
                 reply_to_message=reply_to_message if index == 0 else None,
                 requested_by=requested_by,
+                idempotency_key=(
+                    uuid.uuid5(idempotency_key, f'attachment:{index}')
+                    if idempotency_key else None
+                ),
             )
             for index, media_path in enumerate(paths)
         ]
@@ -88,36 +134,172 @@ class TelegramAccountViewSet(viewsets.ModelViewSet):
     queryset = TelegramAccount.objects.all()
     serializer_class = TelegramAccountSerializer
     permission_classes = [permissions.IsAuthenticated]
-    
-    @action(detail=True, methods=['post'])
-    def start(self, request, pk=None):
-        """Запустить клиент для аккаунта"""
-        account = self.get_object()
-        
-        if account.account_type == TelegramAccount.AccountType.PERSONAL:
-            # Запуск Hydrogram клиента
-            manager = TelegramClientManager()
+
+    @staticmethod
+    def _health_payload(account):
+        return {
+            'id': account.id,
+            'name': account.name,
+            'account_type': account.account_type,
+            'account_type_display': account.get_account_type_display(),
+            'status': account.status,
+            'status_display': account.get_status_display(),
+            'last_error': account.last_error or '',
+            'last_activity': account.last_activity,
+            'can_start': account.status in {
+                TelegramAccount.AccountStatus.INACTIVE,
+                TelegramAccount.AccountStatus.ERROR,
+            },
+            'admin_url': reverse(
+                'admin:crm_app_telegramaccount_change', args=[account.pk],
+            ),
+        }
+
+    @action(detail=False, methods=['get'])
+    def health(self, request):
+        """Return safe connection health data independently from chat pagination."""
+        accounts = self.get_queryset().order_by('account_type', 'name', 'id')
+        payload = [self._health_payload(item) for item in accounts]
+        if not request.user.is_staff:
+            for item in payload:
+                item['can_start'] = False
+                item['admin_url'] = ''
+        return Response({'accounts': payload})
+
+    @action(detail=False, methods=['post'])
+    def import_chats(self, request):
+        """Queue discovery of private, non-bot chats for active accounts."""
+        from datetime import datetime, timedelta
+        from .tasks import run_history_import
+
+        messenger = request.data.get('messenger', 'telegram')
+        account_types = {
+            'telegram': [TelegramAccount.AccountType.PERSONAL],
+            'whatsapp': [TelegramAccount.AccountType.WHATSAPP],
+            'max': [TelegramAccount.AccountType.MAX],
+            'all': [
+                TelegramAccount.AccountType.PERSONAL,
+                TelegramAccount.AccountType.WHATSAPP,
+                TelegramAccount.AccountType.MAX,
+            ],
+        }.get(messenger)
+        if not account_types:
+            return Response({'error': 'Неизвестный мессенджер.'}, status=status.HTTP_400_BAD_REQUEST)
+        since_value = request.data.get('since')
+        if since_value:
             try:
-                success = manager.start_client_sync(account)
-                
-                if success:
-                    return Response({'status': 'started'}, status=status.HTTP_200_OK)
-                else:
-                    return Response(
-                        {'error': account.last_error or 'Failed to start client'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-            except Exception as e:
-                logger.exception(f"Error starting client: {e}")
-                return Response(
-                    {'error': str(e)},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
+                since = datetime.fromisoformat(str(since_value)).date()
+                since_iso = timezone.make_aware(datetime.combine(since, datetime.min.time())).isoformat()
+            except (TypeError, ValueError):
+                return Response({'error': 'Некорректная дата.'}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            return Response(
-                {'error': 'Only personal accounts can be started'},
-                status=status.HTTP_400_BAD_REQUEST
+            since_iso = (timezone.now() - timedelta(days=60)).isoformat()
+        accounts = TelegramAccount.objects.filter(account_type__in=account_types, status=TelegramAccount.AccountStatus.ACTIVE)
+        jobs = []
+        for account in accounts:
+            existing = HistoryImportJob.objects.filter(
+                kind=HistoryImportJob.Kind.CHAT_DISCOVERY,
+                account=account,
+                status__in=[HistoryImportJob.Status.PENDING, HistoryImportJob.Status.RUNNING],
+            ).first()
+            if existing:
+                jobs.append(existing)
+                continue
+            job = HistoryImportJob.objects.create(
+                kind=HistoryImportJob.Kind.CHAT_DISCOVERY,
+                account=account,
+                requested_by=request.user,
+                parameters={'since': since_iso, 'messages_per_chat': 5},
             )
+            run_history_import.delay(job.id)
+            jobs.append(job)
+        if not jobs:
+            return Response({'error': 'Нет активных аккаунтов выбранного мессенджера.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'jobs': HistoryImportJobSerializer(jobs, many=True).data}, status=status.HTTP_202_ACCEPTED)
+    
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
+    def start(self, request, pk=None):
+        """Safely request an account start without blocking the web process."""
+        account = self.get_object()
+
+        def fail(message):
+            account.status = TelegramAccount.AccountStatus.ERROR
+            account.last_error = str(message)[:2000]
+            account.error_count += 1
+            account.save(update_fields=['status', 'last_error', 'error_count', 'updated_at'])
+            return Response(
+                {
+                    'error': f'Не удалось запустить «{account.name}»: {message}',
+                    'requires_admin': True,
+                    'admin_url': self._health_payload(account)['admin_url'],
+                    'account': self._health_payload(account),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if account.account_type == TelegramAccount.AccountType.PERSONAL:
+            if not account.api_id or not account.api_hash:
+                return fail('не заполнены API ID или API Hash Telegram.')
+            if not account.session_string:
+                return fail('нет активной Telegram-сессии. Авторизуйте аккаунт в админке.')
+            requested_at = timezone.now()
+            account.status = TelegramAccount.AccountStatus.ACTIVE
+            account.last_error = ''
+            account.restart_requested_at = requested_at
+            account.save(update_fields=[
+                'status', 'last_error', 'restart_requested_at', 'updated_at',
+            ])
+            return Response({
+                'status': 'starting',
+                'requested_at': requested_at,
+                'account': self._health_payload(account),
+            }, status=status.HTTP_202_ACCEPTED)
+
+        if account.account_type == TelegramAccount.AccountType.BOT:
+            if not account.bridge_url or not account.bridge_secret:
+                return fail('не настроены Bridge URL или Bridge Secret.')
+            account.status = TelegramAccount.AccountStatus.ACTIVE
+            account.last_error = ''
+            account.last_activity = timezone.now()
+            account.save(update_fields=['status', 'last_error', 'last_activity', 'updated_at'])
+            return Response({'status': 'started', 'account': self._health_payload(account)})
+
+        if account.account_type in {
+            TelegramAccount.AccountType.WHATSAPP,
+            TelegramAccount.AccountType.MAX,
+        }:
+            try:
+                from .services.whatsapp_client import GreenAPIClient
+
+                client = GreenAPIClient(account, timeout=12)
+                state_data = client.get_state_instance()
+                state_name = state_data.get('stateInstance') if isinstance(state_data, dict) else ''
+                if state_name != 'authorized':
+                    return fail(
+                        f'инстанс GREEN-API не авторизован (состояние: {state_name or "неизвестно"}).'
+                    )
+                public_base_url = (settings.DOMAIN or '').strip().rstrip('/')
+                if public_base_url and '://' not in public_base_url:
+                    public_base_url = f'https://{public_base_url}'
+                if not public_base_url.startswith('https://'):
+                    return fail('в настройках CRM не указан публичный HTTPS-домен для webhook.')
+                route_name = (
+                    'max-webhook'
+                    if account.account_type == TelegramAccount.AccountType.MAX
+                    else 'whatsapp-webhook'
+                )
+                webhook_path = reverse(route_name, kwargs={'account_id': account.id})
+                client.configure_webhook(f'{public_base_url}{webhook_path}')
+            except Exception as exc:
+                logger.warning('Could not start GREEN-API account %s: %s', account.id, exc)
+                return fail(exc)
+            account.status = TelegramAccount.AccountStatus.ACTIVE
+            account.last_error = ''
+            account.last_activity = timezone.now()
+            account.save(update_fields=['status', 'last_error', 'last_activity', 'updated_at'])
+            return Response({'status': 'started', 'account': self._health_payload(account)})
+
+        return fail('неподдерживаемый тип аккаунта.')
     
     @action(detail=True, methods=['post'])
     def stop(self, request, pk=None):
@@ -307,9 +489,22 @@ class HealthCheckView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
-        """Простая проверка здоровья"""
+        """Return success only when Django and its database both respond."""
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT 1')
+                cursor.fetchone()
+        except Exception:
+            logger.exception('Database health check failed')
+            return Response({
+                'status': 'unhealthy',
+                'database': 'unavailable',
+                'timestamp': timezone.now().isoformat(),
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
         return Response({
             'status': 'healthy',
+            'database': 'healthy',
             'timestamp': timezone.now().isoformat()
         }, status=status.HTTP_200_OK)
 
@@ -371,20 +566,144 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
 
     serializer_class = ChatSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = ChatPagination
+
+    @action(detail=True, methods=['post'])
+    def import_history(self, request, pk=None):
+        from .tasks import run_history_import
+
+        chat = self.get_object()
+        load_all = bool(request.data.get('all'))
+        count = request.data.get('count')
+        if not load_all:
+            try:
+                count = int(count)
+            except (TypeError, ValueError):
+                return Response({'error': 'Укажите количество сообщений.'}, status=status.HTTP_400_BAD_REQUEST)
+            if count < 1 or count > 10000:
+                return Response({'error': 'Количество должно быть от 1 до 10 000.'}, status=status.HTTP_400_BAD_REQUEST)
+        existing = HistoryImportJob.objects.filter(
+            kind=HistoryImportJob.Kind.CHAT_HISTORY,
+            chat=chat,
+            status__in=[HistoryImportJob.Status.PENDING, HistoryImportJob.Status.RUNNING],
+        ).first()
+        if existing:
+            return Response(HistoryImportJobSerializer(existing).data, status=status.HTTP_202_ACCEPTED)
+        job = HistoryImportJob.objects.create(
+            kind=HistoryImportJob.Kind.CHAT_HISTORY,
+            account=chat.telegram_account,
+            chat=chat,
+            requested_by=request.user,
+            parameters={'count': None if load_all else count, 'all': load_all},
+        )
+        run_history_import.delay(job.id)
+        return Response(HistoryImportJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+    def _visible_chats(self):
+        """Apply cheap list filters before previews and pagination are built."""
+        queryset = (
+            Chat.objects.select_related("telegram_account", "google_contact")
+            .filter(
+                chat_type__in=[
+                    Chat.ChatType.PRIVATE,
+                    Chat.ChatType.GROUP,
+                    Chat.ChatType.SUPERGROUP
+                ],
+                is_bot=False,
+            )
+            .only(
+                "id",
+                "telegram_id",
+                "telegram_account_id",
+                "chat_type",
+                "title",
+                "username",
+                "first_name",
+                "last_name",
+                "message_count",
+                "unread_count",
+                "created_at",
+                "updated_at",
+                "last_message_at",
+                "is_archived",
+                "is_bot",
+                "telegram_account__id",
+                "telegram_account__name",
+                "telegram_account__account_type",
+                "telegram_account__status",
+                "google_contact_id",
+                "google_contact__display_name",
+                "needs_human_attention",
+                "ai_paused_until",
+                "ai_disabled",
+            )
+        )
+        messenger = self.request.query_params.get('messenger', 'all').strip().lower()
+        account_types = {
+            'telegram': [
+                TelegramAccount.AccountType.PERSONAL,
+                TelegramAccount.AccountType.BOT,
+            ],
+            'max': [TelegramAccount.AccountType.MAX],
+            'whatsapp': [TelegramAccount.AccountType.WHATSAPP],
+        }.get(messenger)
+        if account_types is not None:
+            queryset = queryset.filter(telegram_account__account_type__in=account_types)
+
+        search_query = (self.request.query_params.get('search') or '').strip()
+        if search_query:
+            queryset = queryset.filter(
+                Q(title__icontains=search_query)
+                | Q(username__icontains=search_query)
+                | Q(first_name__icontains=search_query)
+                | Q(last_name__icontains=search_query)
+                | Q(telegram_account__name__icontains=search_query)
+                | Q(google_contact__display_name__icontains=search_query)
+                | Q(google_contact__normalized_phone__icontains=search_query)
+            )
+        return queryset
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        from .services.ai_assistant import operator_is_present
+        config = AISettings.load()
+        global_paused = bool(config.paused_until and config.paused_until > timezone.now())
+        context['ai_runtime'] = {
+            'enabled': config.is_active(),
+            'global_paused': global_paused,
+            'global_paused_until': config.paused_until if global_paused else None,
+            'online_override_enabled': config.online_override_enabled,
+            'operator_present': operator_is_present(config),
+        }
+        return context
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        totals = self._visible_chats().aggregate(
+            active_count=Count('id', filter=Q(is_archived=False)),
+            archive_count=Count('id', filter=Q(is_archived=True)),
+        )
+        response.data.update(totals)
+        return response
 
     def get_queryset(self):
         # Group messages remain persisted, but are intentionally hidden from the
         # operator workspace until group-chat UX is ready.
-        queryset = Chat.objects.select_related('telegram_account').filter(
-            chat_type=Chat.ChatType.PRIVATE,
-            is_bot=False,
+        # last_message_at is maintained by ingestion/outbox code and indexed.
+        # Ordering by correlated subqueries forced MySQL to inspect messages
+        # for every chat before returning even the first page.
+        latest_message = Message.objects.filter(chat_id=OuterRef('pk')).order_by('-telegram_date').annotate(
+            preview=Substr(Coalesce('text', 'media_caption'), 1, 100),
+        )
+        queryset = self._visible_chats().annotate(
+            latest_stored_message_preview=Subquery(latest_message.values('preview')[:1]),
         )
         archived = self.request.query_params.get('archived')
         if archived in {'1', 'true', 'yes'}:
             queryset = queryset.filter(is_archived=True)
         elif archived in {'0', 'false', 'no'}:
             queryset = queryset.filter(is_archived=False)
-        return queryset.order_by('-last_message_at')
+        return queryset.order_by('-last_message_at', '-updated_at', '-id')
 
     @action(detail=True, methods=['post'])
     def archive(self, request, pk=None):
@@ -408,6 +727,77 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({'status': 'success'})
 
     @action(detail=True, methods=['post'])
+    def reset_ai_pause(self, request, pk=None):
+        if not request.user.is_staff:
+            return Response({'error': 'Недостаточно прав.'}, status=status.HTTP_403_FORBIDDEN)
+
+        chat = self.get_object()
+        chat.ai_disabled = False
+        chat.ai_paused_until = None
+        chat.save(update_fields=['ai_disabled', 'ai_paused_until', 'updated_at'])
+
+        config = AISettings.load()
+        state = ChatAIState.objects.filter(chat=chat, source_message__isnull=False).first()
+        if config.enabled and state:
+            from .services.ai_assistant import operator_is_present
+            from .tasks import process_ai_reply_task
+
+            present = operator_is_present(config)
+            delay = config.online_delay_seconds if present and config.online_override_enabled else config.offline_delay_seconds
+            process_ai_reply_task.apply_async(
+                args=[chat.id, state.generation],
+                countdown=max(1, delay),
+            )
+
+        return Response({'status': 'reset', 'ai_paused_until': None})
+
+    @action(detail=True, methods=['post'])
+    def set_ai_mode(self, request, pk=None):
+        if not request.user.is_staff:
+            return Response({'error': 'Недостаточно прав.'}, status=status.HTTP_403_FORBIDDEN)
+
+        mode = str(request.data.get('mode') or '').strip().lower()
+        if mode not in {'enabled', 'paused', 'disabled'}:
+            return Response({'error': 'Неизвестный режим ИИ.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        paused_until = None
+        hours = None
+        if mode == 'paused':
+            try:
+                hours = int(request.data.get('hours'))
+            except (TypeError, ValueError):
+                return Response({'error': 'Укажите количество часов.'}, status=status.HTTP_400_BAD_REQUEST)
+            if hours < 1 or hours > 720:
+                return Response({'error': 'Пауза должна быть от 1 до 720 часов.'}, status=status.HTTP_400_BAD_REQUEST)
+            paused_until = timezone.now() + timedelta(hours=hours)
+
+        with transaction.atomic():
+            chat = Chat.objects.select_for_update().get(pk=self.get_object().pk)
+            chat.ai_disabled = mode == 'disabled'
+            chat.ai_paused_until = paused_until
+            chat.save(update_fields=['ai_disabled', 'ai_paused_until', 'updated_at'])
+
+            state, _ = ChatAIState.objects.select_for_update().get_or_create(chat=chat)
+            state.generation += 1
+            state.source_message = None
+            state.due_at = None
+            state.processing = False
+            state.last_error = ''
+            state.save()
+
+        reason = {
+            'enabled': 'ИИ включён для диалога',
+            'paused': f'ИИ временно отключён на {hours} ч.',
+            'disabled': 'ИИ отключён до ручного включения',
+        }[mode]
+        return Response({
+            'status': mode,
+            'ai_disabled': chat.ai_disabled,
+            'ai_paused_until': chat.ai_paused_until,
+            'message': reason,
+        })
+
+    @action(detail=True, methods=['post'])
     def send_message(self, request, pk=None):
         chat = self.get_object()
         serializer = SendMessageSerializer(data=request.data)
@@ -417,8 +807,288 @@ class ChatViewSet(viewsets.ReadOnlyModelViewSet):
             text=serializer.validated_data.get('text', ''),
             media_paths=serializer.validated_data.get('media_paths', []),
             requested_by=request.user,
+            idempotency_key=serializer.validated_data.get('idempotency_key'),
         )
         return Response(_delivery_response(deliveries), status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["post"])
+    def add_members(self, request, pk=None):
+        """Эндпоинт для добавления участников в группу."""
+        chat = self.get_object()
+
+        # Разрешаем только для групп
+        if chat.chat_type not in {Chat.ChatType.GROUP, Chat.ChatType.SUPERGROUP}:
+            return Response(
+                {"error": "Добавление участников доступно только для групп."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        account = chat.telegram_account
+        if account.account_type != TelegramAccount.AccountType.PERSONAL:
+            return Response(
+                {
+                    "error": "Добавление в группы работает только для личных Telegram-аккаунтов."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        users = request.data.get("users")
+        if not users or not isinstance(users, list):
+            return Response(
+                {
+                    "error": 'Передайте список пользователей в поле "users" (например, номера телефонов или @username).'
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .services.telegram_client_manager import TelegramClientManager
+
+        manager = TelegramClientManager()
+
+        try:
+            # Запускаем асинхронный метод в синхронной View
+            result = manager.run_async_sync(
+                manager.add_chat_members(account.id, chat.telegram_id, users)
+            )
+
+            if result.get("success"):
+                return Response({"status": "success"})
+            else:
+                return Response(
+                    {"error": result.get("error")}, status=status.HTTP_400_BAD_REQUEST
+                )
+
+        except Exception as e:
+            logger.exception("Error in add_members API")
+            return Response(
+                {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class AISettingsView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from .services.ai_assistant import operator_is_present
+        config = AISettings.load()
+        data = AISettingsSerializer(config).data
+        data['operator_present'] = operator_is_present(config)
+        return Response(data)
+
+    def patch(self, request):
+        if not request.user.is_staff:
+            return Response({'error': 'Изменять настройки ИИ может только администратор.'}, status=status.HTTP_403_FORBIDDEN)
+        config = AISettings.load()
+        serializer = AISettingsSerializer(config, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        if 'enabled' in request.data:
+            AISettings.objects.filter(pk=config.pk).update(paused_until=None)
+            config.paused_until = None
+        if not config.enabled:
+            AISettings.objects.filter(pk=config.pk).update(online_override_enabled=False)
+            ChatAIState.objects.update(source_message=None, due_at=None, processing=False)
+        return self.get(request)
+
+
+class AIGlobalModeView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.is_staff:
+            return Response({'error': 'Недостаточно прав.'}, status=status.HTTP_403_FORBIDDEN)
+
+        mode = str(request.data.get('mode') or '').strip().lower()
+        if mode not in {'enabled', 'paused', 'disabled'}:
+            return Response({'error': 'Неизвестный режим ИИ.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        config = AISettings.load()
+        update_fields = ['enabled', 'paused_until', 'online_override_enabled', 'updated_at']
+        if mode == 'enabled':
+            config.enabled = True
+            config.paused_until = None
+        elif mode == 'disabled':
+            config.enabled = False
+            config.paused_until = None
+            config.online_override_enabled = False
+        else:
+            try:
+                hours = int(request.data.get('hours'))
+            except (TypeError, ValueError):
+                hours = 0
+            if not 1 <= hours <= 720:
+                return Response(
+                    {'error': 'Укажите срок от 1 до 720 часов.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            config.enabled = True
+            config.paused_until = timezone.now() + timedelta(hours=hours)
+            config.online_override_enabled = False
+        config.save(update_fields=update_fields)
+
+        if mode != 'enabled':
+            ChatAIState.objects.update(source_message=None, due_at=None, processing=False)
+
+        data = AISettingsSerializer(config).data
+        from .services.ai_assistant import operator_is_present
+        data['operator_present'] = operator_is_present(config)
+        return Response(data)
+
+
+class AIPresenceView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        from .services.ai_assistant import operator_is_present
+        try:
+            tab_id = uuid.UUID(str(request.data.get('tab_id')))
+        except (TypeError, ValueError, AttributeError):
+            return Response({'error': 'Некорректный идентификатор вкладки.'}, status=status.HTTP_400_BAD_REQUEST)
+        config = AISettings.load()
+        now = timezone.now()
+        is_active = bool(request.data.get('is_visible', True))
+        session, _ = OperatorPresenceSession.objects.get_or_create(
+            user=request.user,
+            tab_id=tab_id,
+            defaults={
+                'is_visible': is_active,
+                'last_seen': now,
+                'last_active_at': now if is_active else None,
+                'inactive_since': None if is_active else now,
+            },
+        )
+        was_session_active = session.is_visible
+        session.is_visible = is_active
+        session.last_seen = now
+        update_fields = ['is_visible', 'last_seen']
+        if is_active:
+            session.last_active_at = now
+            session.inactive_since = None
+            update_fields.extend(['last_active_at', 'inactive_since'])
+        elif was_session_active or session.inactive_since is None:
+            session.inactive_since = now
+            update_fields.append('inactive_since')
+        session.save(update_fields=update_fields)
+        now_present = operator_is_present(config)
+        stale_cutoff = timezone.now() - timedelta(days=1)
+        OperatorPresenceSession.objects.filter(last_seen__lt=stale_cutoff).delete()
+        return Response({
+            'operator_present': now_present,
+            'online_override_enabled': config.online_override_enabled,
+            'enabled': config.enabled,
+            'effective_enabled': config.is_active(),
+            'paused_until': config.paused_until,
+            'global_status': 'disabled' if not config.enabled else ('paused' if not config.is_active() else 'active'),
+        })
+
+
+class AIOnlineOverrideView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.is_staff:
+            return Response({'error': 'Недостаточно прав.'}, status=status.HTTP_403_FORBIDDEN)
+        config = AISettings.load()
+        if not config.is_active():
+            return Response({'error': 'Сначала включите ИИ в настройках.'}, status=status.HTTP_400_BAD_REQUEST)
+        enabled = bool(request.data.get('enabled'))
+        config.online_override_enabled = enabled
+        config.save(update_fields=['online_override_enabled', 'updated_at'])
+        if enabled:
+            from .tasks import process_ai_reply_task
+            for state in ChatAIState.objects.filter(source_message__isnull=False).only('chat_id', 'generation')[:500]:
+                process_ai_reply_task.apply_async(
+                    args=[state.chat_id, state.generation],
+                    countdown=max(1, config.online_delay_seconds),
+                )
+        return Response({'enabled': enabled})
+
+
+def _google_redirect_uri(request):
+    path = reverse('google-contacts-callback')
+    if settings.DOMAIN:
+        domain = settings.DOMAIN if settings.DOMAIN.startswith('http') else 'https://' + settings.DOMAIN
+        return f"{domain.rstrip('/')}{path}"
+    return request.build_absolute_uri(path)
+
+
+class GoogleContactsStatusView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        integration = GoogleContactsIntegration.objects.first()
+        return Response({
+            'configured': bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET),
+            'connected': bool(integration and integration.refresh_token),
+            'account_email': integration.account_email if integration else '',
+            'sync_in_progress': integration.sync_in_progress if integration else False,
+            'last_synced_at': integration.last_synced_at if integration else None,
+            'last_result': integration.last_result if integration else {},
+            'last_error': integration.last_error if integration else '',
+        })
+
+
+class GoogleContactsConnectView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        from .services.google_contacts import authorization_url
+        state = signing.dumps({'user_id': request.user.id}, salt='google-contacts-oauth')
+        return redirect(authorization_url(redirect_uri=_google_redirect_uri(request), state=state))
+
+
+class GoogleContactsCallbackView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        try:
+            payload = signing.loads(
+                request.query_params.get('state', ''),
+                salt='google-contacts-oauth',
+                max_age=900,
+            )
+            if int(payload['user_id']) != request.user.id:
+                raise signing.BadSignature('Wrong user')
+            code = request.query_params['code']
+            integration = GoogleContactsIntegration.objects.first()
+            if integration and integration.user_id != request.user.id:
+                raise PermissionError('Google Контакты уже подключены другим администратором')
+            integration, _ = GoogleContactsIntegration.objects.get_or_create(
+                pk=1,
+                defaults={'user': request.user},
+            )
+            from .services.google_contacts import exchange_code
+            exchange_code(integration, code, _google_redirect_uri(request))
+        except Exception as exc:
+            logger.exception('Google Contacts OAuth failed')
+            return redirect(f'/?google_contacts_error={str(exc)[:120]}')
+        return redirect('/?google_contacts_connected=1')
+
+
+class GoogleContactsSyncView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request):
+        integration = GoogleContactsIntegration.objects.exclude(refresh_token='').first()
+        if not integration:
+            return Response({'error': 'Сначала подключите Google Контакты.'}, status=status.HTTP_400_BAD_REQUEST)
+        sync_is_fresh = integration.updated_at >= timezone.now() - timedelta(minutes=10)
+        if integration.sync_in_progress and sync_is_fresh:
+            return Response({'status': 'running'}, status=status.HTTP_202_ACCEPTED)
+        integration.sync_in_progress = True
+        integration.last_error = ""
+        integration.save(update_fields=["sync_in_progress", "last_error", "updated_at"])
+        from .tasks import sync_google_contacts_task
+        sync_google_contacts_task.delay(integration.id)
+        return Response({'status': 'queued'}, status=status.HTTP_202_ACCEPTED)
+
+
+class HistoryImportJobViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = HistoryImportJobSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return HistoryImportJob.objects.filter(requested_by=self.request.user)
 
 
 class MessageViewSet(viewsets.ReadOnlyModelViewSet):
@@ -426,13 +1096,31 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
 
     serializer_class = MessageSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = MessagePagination
 
     def get_queryset(self):
         return Message.objects.filter(
-            chat__chat_type=Chat.ChatType.PRIVATE,
+            chat__chat_type__in=[Chat.ChatType.PRIVATE, Chat.ChatType.GROUP, Chat.ChatType.SUPERGROUP],
             chat__is_bot=False,
+        ).annotate(
+            api_provider_status=KeyTextTransform('provider_status', 'metadata'),
+            api_delivery_id=KeyTextTransform('delivery_id', 'metadata'),
+            api_original_filename=KeyTextTransform('original_filename', 'metadata'),
+            api_reactions=KeyTransform('reactions', 'metadata'),
         ).select_related(
             'chat', 'chat__telegram_account', 'reply_to_message'
+        ).only(
+            'id', 'telegram_id', 'external_message_id', 'chat_id',
+            'message_type', 'status', 'text', 'is_outgoing',
+            'from_user_id', 'from_user_name', 'from_user_username',
+            'media_file_id', 'media_file_path', 'media_caption',
+            'metadata',
+            'telegram_date', 'created_at', 'updated_at', 'reply_to_message_id',
+            'chat__id', 'chat__title', 'chat__telegram_account_id',
+            'chat__telegram_account__id', 'chat__telegram_account__account_type',
+            'chat__telegram_account__bot_token', 'chat__telegram_account__bridge_url',
+            'reply_to_message__id', 'reply_to_message__text',
+            'reply_to_message__media_caption',
         ).order_by('-telegram_date')
 
     def get_queryset_by_chat(self, chat_id):
@@ -446,9 +1134,15 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
         messages = self.get_queryset_by_chat(chat_id)
         search_query = (request.query_params.get('search') or '').strip()
         if search_query:
-            messages = messages.filter(
-                Q(text__icontains=search_query) | Q(media_caption__icontains=search_query)
-            )
+            # MySQL and SQLite differ in Unicode case-insensitive matching.
+            # Python casefold keeps Russian search predictable on both engines.
+            folded = search_query.casefold()
+            matching_ids = [
+                message_id
+                for message_id, text, caption in messages.values_list('id', 'text', 'media_caption').iterator(chunk_size=500)
+                if folded in (text or '').casefold() or folded in (caption or '').casefold()
+            ]
+            messages = messages.filter(id__in=matching_ids)
         page = self.paginate_queryset(messages)
         if page is not None:
             return self.get_paginated_response(self.get_serializer(page, many=True).data)
@@ -465,8 +1159,38 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
             media_paths=serializer.validated_data.get('media_paths', []),
             reply_to_message=message,
             requested_by=request.user,
+            idempotency_key=serializer.validated_data.get('idempotency_key'),
         )
         return Response(_delivery_response(deliveries), status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=['post'])
+    def react(self, request, pk=None):
+        from .services.outbound_delivery import enqueue_reaction
+        from .services.reactions import normalize_reaction
+
+        message = self.get_object()
+        emoji = normalize_reaction(request.data.get('emoji'))
+        if not emoji:
+            return Response({'error': 'Выберите доступную реакцию.'}, status=status.HTTP_400_BAD_REQUEST)
+        account = message.chat.telegram_account
+        can_react = (
+            account.account_type == TelegramAccount.AccountType.PERSONAL
+            or (
+                account.account_type == TelegramAccount.AccountType.BOT
+                and account.bot_token and not account.bridge_url
+            )
+        ) and bool(message.telegram_id)
+        if not can_react:
+            return Response(
+                {'error': 'Провайдер этого мессенджера пока не поддерживает отправку реакций через API.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        delivery = enqueue_reaction(message=message, emoji=emoji, requested_by=request.user)
+        return Response({
+            'status': 'pending',
+            'delivery_id': delivery.id,
+            'emoji': emoji,
+        }, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=['get'])
     def download_media(self, request, pk=None):
@@ -492,6 +1216,56 @@ class MessageViewSet(viewsets.ReadOnlyModelViewSet):
             if account.account_type in {TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX}:
                 from .services.provider_media import download_green_api_media
                 media_path = download_green_api_media(message)
+            elif account.account_type == TelegramAccount.AccountType.PERSONAL:
+                with transaction.atomic():
+                    locked = Message.objects.select_for_update().get(pk=message.pk)
+                    metadata = dict(locked.metadata or {})
+                    download_state = metadata.get('media_download') or {}
+                    state = download_state.get('status')
+                    updated_at = download_state.get('updated_at')
+                    recent = False
+                    if updated_at:
+                        try:
+                            state_time = datetime.fromisoformat(updated_at)
+                            if timezone.is_naive(state_time):
+                                state_time = timezone.make_aware(state_time)
+                            recent = (timezone.now() - state_time).total_seconds() < 240
+                        except (TypeError, ValueError):
+                            pass
+                    if state in {'queued', 'downloading'} and recent:
+                        return Response({'status': state}, status=status.HTTP_202_ACCEPTED)
+                    if state == 'failed' and request.query_params.get('poll') == '1':
+                        return Response(
+                            {
+                                'error': download_state.get('error') or 'Не удалось скачать файл из Telegram.',
+                                'code': 'provider_download_failed',
+                            },
+                            status=status.HTTP_502_BAD_GATEWAY,
+                        )
+                    metadata['media_download'] = {
+                        'status': 'queued',
+                        'error': '',
+                        'updated_at': timezone.now().isoformat(),
+                    }
+                    locked.metadata = metadata
+                    locked.save(update_fields=['metadata', 'updated_at'])
+                try:
+                    download_telegram_media_task.delay(message.pk)
+                except Exception as exc:
+                    logger.exception('Could not queue Telegram media download for message %s', message.pk)
+                    failed = Message.objects.only('id', 'metadata').get(pk=message.pk)
+                    failed_metadata = dict(failed.metadata or {})
+                    failed_metadata['media_download'] = {
+                        'status': 'failed',
+                        'error': str(exc)[:1000],
+                        'updated_at': timezone.now().isoformat(),
+                    }
+                    Message.objects.filter(pk=message.pk).update(metadata=failed_metadata)
+                    return Response(
+                        {'error': f'Не удалось поставить загрузку в очередь: {exc}', 'code': 'queue_unavailable'},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    )
+                return Response({'status': 'queued'}, status=status.HTTP_202_ACCEPTED)
             else:
                 media_path = TelegramClientManager().download_media_by_message_id_sync(message)
             if media_path:

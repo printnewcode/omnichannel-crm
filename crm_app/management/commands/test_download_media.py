@@ -2,6 +2,7 @@ from django.core.management.base import BaseCommand
 from crm_app.models import Message
 from crm_app.services.telegram_client_manager import TelegramClientManager
 import asyncio
+from asgiref.sync import sync_to_async
 
 class Command(BaseCommand):
     help = 'Test downloading media for a specific message'
@@ -22,7 +23,7 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.SUCCESS(f'Success! Downloaded to: {result}'))
 
                 # Проверить что файл сохранен
-                message.refresh_from_db()
+                await sync_to_async(message.refresh_from_db)()
                 self.stdout.write(f'Message media_file_path: {message.media_file_path}')
 
             except Exception as e:

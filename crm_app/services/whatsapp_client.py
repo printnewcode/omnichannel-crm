@@ -1,6 +1,8 @@
 """Shared GREEN-API client for personal WhatsApp and MAX accounts."""
 
 from pathlib import Path
+import random
+import time
 
 import requests
 from django.conf import settings
@@ -19,6 +21,23 @@ class GreenAPIClient:
         self.timeout = timeout
         self.api_url = (account.green_api_url or 'https://api.green-api.com').rstrip('/')
         self.media_url = (account.green_media_url or 'https://media.green-api.com').rstrip('/')
+        self._last_request_at = {}
+
+    def _wait_for_rate_slot(self, api_method):
+        """Respect GREEN-API's one-request-per-second journal limits."""
+        intervals = {
+            'getChatHistory': 1.1,
+            'getChats': 1.1,
+            'lastIncomingMessages': 1.1,
+            'lastOutgoingMessages': 1.1,
+        }
+        interval = intervals.get(api_method)
+        if not interval:
+            return
+        elapsed = time.monotonic() - self._last_request_at.get(api_method, 0)
+        if elapsed < interval:
+            time.sleep(interval - elapsed)
+        self._last_request_at[api_method] = time.monotonic()
 
     def _url(self, method, *, media=False):
         host = self.media_url if media else self.api_url
@@ -26,23 +45,40 @@ class GreenAPIClient:
 
     def _request(self, method, api_method, *, media=False, **kwargs):
         timeout = kwargs.pop('timeout', self.timeout)
-        response = self.session.request(method, self._url(api_method, media=media), timeout=timeout, **kwargs)
-        if response.ok:
+        response = None
+        for attempt in range(4):
+            self._wait_for_rate_slot(api_method)
+            response = self.session.request(method, self._url(api_method, media=media), timeout=timeout, **kwargs)
+            if response.ok:
+                try:
+                    return response.json()
+                except ValueError as exc:
+                    raise GreenAPIError('GREEN-API returned invalid JSON') from exc
+            if response.status_code != 429 or attempt == 3:
+                break
+            retry_after = response.headers.get('Retry-After')
             try:
-                return response.json()
-            except ValueError as exc:
-                raise GreenAPIError('GREEN-API returned invalid JSON') from exc
+                delay = max(float(retry_after), 1.1) if retry_after else 1.5 * (2 ** attempt)
+            except (TypeError, ValueError):
+                delay = 1.5 * (2 ** attempt)
+            time.sleep(min(delay + random.uniform(0.05, 0.25), 10))
         try:
             payload = response.json()
-            detail = payload.get('message') or payload.get('error') or payload
+            if isinstance(payload, dict):
+                detail = payload.get('message') or payload.get('error') or payload
+            else:
+                # Some GREEN-API clusters return a JSON string for validation
+                # and media errors. Treat it as the error body, not an object.
+                detail = payload
         except ValueError:
             detail = response.text[:500]
         raise GreenAPIError(f'GREEN-API HTTP {response.status_code}: {detail}')
 
     def normalize_chat_id(self, chat_id):
-        value = str(chat_id)
+        value = str(chat_id).strip()
         if self.account.account_type == 'max':
             return value
+        value = value.lower()
         return value if '@' in value else f'{value.lstrip("+")}@c.us'
 
     @staticmethod
@@ -95,6 +131,60 @@ class GreenAPIClient:
     def get_settings(self):
         return self._request('GET', 'getSettings')
 
+    def get_state_instance(self):
+        """Return the current GREEN-API authorization state."""
+        return self._request('GET', 'getStateInstance')
+
+    def get_chats(self, count=1000):
+        # MAX GetChats has no count query parameter, unlike WhatsApp GetChats.
+        if self.account.account_type == 'max':
+            return self._request('GET', 'getChats')
+        return self._request('GET', 'getChats', params={'count': max(1, min(int(count), 1000))})
+
+    def get_chat_history(self, chat_id, count=100):
+        maximum = 5000 if self.account.account_type == 'max' else 10000
+        payload = {
+            'chatId': self.normalize_chat_id(chat_id),
+            'count': max(1, min(int(count), maximum)),
+        }
+        return self._request('POST', 'getChatHistory', json=payload)
+
+    def get_message(self, chat_id, message_id):
+        """Return one journal message, including refreshed media metadata."""
+        return self._request('POST', 'getMessage', json={
+            'chatId': self.normalize_chat_id(chat_id),
+            'idMessage': str(message_id),
+        })
+
+    def get_download_url(self, chat_id, message_id):
+        """Ask GREEN-API to generate a fresh provider-owned media link."""
+        result = self._request('POST', 'downloadFile', json={
+            'chatId': self.normalize_chat_id(chat_id),
+            'idMessage': str(message_id),
+        })
+        # GREEN-API clusters return either the documented object or a JSON
+        # string containing the URL directly.
+        if isinstance(result, str):
+            return result.strip() or None
+        if isinstance(result, dict):
+            value = result.get('downloadUrl') or result.get('downloadUrlJpeg') or result.get('urlFile')
+            if isinstance(value, dict):
+                value = value.get('url') or value.get('href') or value.get('downloadUrl')
+            return value.strip() if isinstance(value, str) and value.strip() else None
+        raise GreenAPIError('GREEN-API downloadFile returned an unexpected response')
+
+    def get_last_incoming_messages(self, minutes):
+        return self._request(
+            'GET', 'lastIncomingMessages',
+            params={'minutes': max(1, int(minutes))},
+        )
+
+    def get_last_outgoing_messages(self, minutes):
+        return self._request(
+            'GET', 'lastOutgoingMessages',
+            params={'minutes': max(1, int(minutes))},
+        )
+
     def configure_webhook(self, webhook_url):
         token = (self.account.green_webhook_token or '').strip()
         if token and not token.lower().startswith(('bearer ', 'basic ')):
@@ -104,7 +194,7 @@ class GreenAPIClient:
             'webhookUrlToken': token,
             'incomingWebhook': 'yes',
             'outgoingWebhook': 'yes',
+            'outgoingMessageWebhook': 'yes',
             'outgoingAPIMessageWebhook': 'yes',
             'stateWebhook': 'yes',
         })
-

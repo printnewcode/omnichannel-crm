@@ -115,6 +115,8 @@ class BotPollingService:
                 unread_count=F('unread_count') + 1,
                 last_message_at=message.telegram_date,
             )
+            from .ai_assistant import register_incoming_message
+            await database_sync_to_async(register_incoming_message)(message.id)
             logger.info(f"Processed message {message.telegram_id} in chat {chat_id}")
 
         except Exception as e:

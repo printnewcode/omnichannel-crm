@@ -3,26 +3,169 @@
 """
 from urllib.parse import urljoin, urlsplit
 
+from django import forms
 from django.conf import settings
 from django.contrib import admin
 from django.shortcuts import render, redirect
 from django.urls import path, reverse
 from django.contrib import messages
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 from .models import (
-    TelegramAccount, Chat, Message, OutboundDelivery
+    TelegramAccount, Chat, Message, OutboundDelivery, HistoryImportJob,
+    AISettings, GoogleContactsIntegration, GoogleContact,
+    QuickReply,
 )
+
+
+@admin.register(QuickReply)
+class QuickReplyAdmin(admin.ModelAdmin):
+    list_display = ('command', 'short_text', 'created_by', 'updated_at')
+    search_fields = ('command', 'text')
+    readonly_fields = ('created_by', 'created_at', 'updated_at')
+
+    @admin.display(description='Текст')
+    def short_text(self, obj):
+        return obj.text if len(obj.text) <= 80 else f'{obj.text[:77]}…'
+
+
+@admin.register(AISettings)
+class AISettingsAdmin(admin.ModelAdmin):
+    fieldsets = (
+        ('Работа автоответчика', {
+            'fields': ('enabled', 'model', 'fallback_text'),
+        }),
+        ('Инструкции', {
+            'fields': ('base_prompt', 'company_information'),
+            'description': 'ИИ отвечает только на основании информации о компании. Промпт определяет стиль и правила ответа.',
+        }),
+        ('Таймеры и ограничения', {
+            'fields': (
+                'offline_delay_seconds', 'online_delay_seconds', 'manual_pause_minutes',
+                'presence_timeout_seconds', 'operator_idle_seconds',
+                'max_incoming_age_minutes', 'context_message_limit',
+                'context_character_limit', 'max_response_tokens',
+            ),
+        }),
+    )
+    readonly_fields = ('model',)
+
+    def has_add_permission(self, request):
+        return not AISettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(GoogleContactsIntegration)
+class GoogleContactsIntegrationAdmin(admin.ModelAdmin):
+    list_display = ('user', 'account_email', 'last_synced_at', 'sync_in_progress')
+    fields = (
+        'user', 'account_email', 'last_synced_at', 'sync_in_progress',
+        'last_result', 'last_error', 'created_at', 'updated_at',
+    )
+    readonly_fields = (
+        'user', 'account_email', 'last_synced_at', 'sync_in_progress',
+        'last_result', 'last_error', 'created_at', 'updated_at',
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(GoogleContact)
+class GoogleContactAdmin(admin.ModelAdmin):
+    list_display = ('display_name', 'phone_number', 'deleted', 'updated_at')
+    search_fields = ('display_name', 'phone_number', 'normalized_phone')
+    list_filter = ('deleted',)
+    readonly_fields = (
+        'integration', 'resource_name', 'display_name', 'phone_number',
+        'normalized_phone', 'deleted', 'provider_updated_at', 'updated_at',
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+
+class TelegramAccountAdminForm(forms.ModelForm):
+    """Human-friendly account form; provider credentials remain the only manual fields."""
+
+    class Meta:
+        model = TelegramAccount
+        fields = '__all__'
+        widgets = {
+            'api_hash': forms.PasswordInput(render_value=True),
+            'bot_token': forms.PasswordInput(render_value=True),
+            'bridge_secret': forms.PasswordInput(render_value=True),
+            'green_api_token': forms.PasswordInput(render_value=True),
+            'green_webhook_token': forms.PasswordInput(render_value=True),
+        }
+
+    HELP_TEXTS = {
+        'name': 'Понятное внутреннее название, например «Telegram поддержки» или «WhatsApp отдела продаж».',
+        'status': 'Статус можно изменить вручную. Для WhatsApp и MAX установите «Активен» после авторизации инстанса и настройки webhook.',
+        'account_type': 'Выберите мессенджер и способ подключения. После создания тип фиксируется.',
+        'phone_number': 'Номер личного Telegram-аккаунта в международном формате, например +79991234567.',
+        'api_id': mark_safe(
+            'Числовой API ID приложения Telegram. Получить вместе с API Hash: '
+            '<a href="https://my.telegram.org/apps" target="_blank" rel="noopener">my.telegram.org/apps</a>.'
+        ),
+        'api_hash': mark_safe(
+            'Секрет API Hash приложения Telegram. Получить: '
+            '<a href="https://my.telegram.org/apps" target="_blank" rel="noopener">my.telegram.org/apps</a>. '
+            'Не передавайте его третьим лицам.'
+        ),
+        'bot_token': mark_safe(
+            'Токен существующего Telegram-бота. Его выдаёт '
+            '<a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a>.'
+        ),
+        'bot_username': 'Username Telegram-бота без символа @, например support_bot.',
+        'bridge_url': 'HTTPS-адрес обработчика в проекте бота, куда CRM отправляет ответ. Можно использовать {question_id}.',
+        'bridge_secret': 'Общий секрет CRM и проекта Telegram-бота. Значение должно совпадать с BRIDGE_SECRET в конфигурации бота.',
+        'green_api_instance_id': mark_safe(
+            'idInstance нужного WhatsApp или MAX инстанса. Скопируйте в '
+            '<a href="https://console.green-api.com/" target="_blank" rel="noopener">личном кабинете GREEN-API</a>.'
+        ),
+        'green_api_token': mark_safe(
+            'apiTokenInstance этого же инстанса. Скопируйте в '
+            '<a href="https://console.green-api.com/" target="_blank" rel="noopener">личном кабинете GREEN-API</a>.'
+        ),
+        'green_webhook_token': 'Придумайте отдельный длинный случайный секрет. GREEN-API будет передавать его CRM при каждом webhook-запросе.',
+        'green_api_url': 'Базовый apiUrl инстанса. Обычно менять https://api.green-api.com не требуется; индивидуальный адрес указан в кабинете GREEN-API.',
+        'green_media_url': 'Адрес загрузки файлов GREEN-API. Обычно менять https://media.green-api.com не требуется.',
+    }
+
+    LABELS = {
+        'green_api_instance_id': 'GREEN-API idInstance',
+        'green_api_token': 'GREEN-API apiTokenInstance',
+        'green_webhook_token': 'Секрет webhook GREEN-API',
+        'green_api_url': 'GREEN-API URL запросов',
+        'green_media_url': 'GREEN-API URL файлов',
+    }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for field_name, help_text in self.HELP_TEXTS.items():
+            if field_name in self.fields:
+                self.fields[field_name].help_text = help_text
+        for field_name, label in self.LABELS.items():
+            if field_name in self.fields:
+                self.fields[field_name].label = label
 
 
 @admin.register(TelegramAccount)
 class TelegramAccountAdmin(admin.ModelAdmin):
+    form = TelegramAccountAdminForm
     list_display = ['name', 'account_type', 'status', 'channel_connection', 'last_activity', 'error_summary', 'otp_link', 'qr_link']
     list_filter = ['account_type', 'status', 'created_at']
     ordering = ['account_type', 'name']
     list_per_page = 50
     save_on_top = True
     search_fields = ['name', 'phone_number', 'bot_username', 'username', 'green_api_instance_id']
-    readonly_fields = ['created_at', 'updated_at', 'last_activity']
+    readonly_fields = [
+        'session_string', 'telegram_user_id', 'first_name', 'last_name', 'username',
+        'last_error', 'error_count', 'created_at', 'updated_at', 'last_activity',
+    ]
     actions = ['start_authentication', 'resend_code', 'request_manual_code', 'start_accounts', 'stop_accounts', 'restart_accounts', 'check_auth_status', 'terminate_sessions', 'configure_green_api_webhooks']
 
     @admin.display(description='Подключение')
@@ -41,26 +184,44 @@ class TelegramAccountAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ('Основная информация', {
-            'fields': ('name', 'account_type', 'status')
+            'fields': ('name', 'account_type', 'status'),
+            'description': 'Укажите название, тип подключения и статус. Статус можно менять вручную; для WhatsApp и MAX выбирайте «Активен» только после авторизации и настройки webhook.'
         }),
         ('Личный аккаунт (Telethon)', {
             'fields': ('phone_number', 'api_id', 'api_hash', 'session_string'),
-            'classes': ('collapse',)
+            'classes': ('collapse',),
+            'description': mark_safe(
+                'Только для личного Telegram. API ID и API Hash создаются на '
+                '<a href="https://my.telegram.org/apps" target="_blank" rel="noopener">my.telegram.org/apps</a>. '
+                'Сессия появится автоматически после авторизации.'
+            ),
         }),
         ('Бот (pyTelegramBotAPI)', {
             'fields': ('bot_token', 'bot_username', 'bridge_url', 'bridge_secret'),
-            'classes': ('collapse',)
+            'classes': ('collapse',),
+            'description': mark_safe(
+                'Только для существующего Telegram-бота. Bot Token выдаёт '
+                '<a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a>; '
+                'bridge-параметры должны совпадать с конфигурацией проекта бота.'
+            ),
         }),
         ('GREEN-API (WhatsApp / личный MAX)', {
             'fields': ('green_api_instance_id', 'green_api_token', 'green_webhook_token', 'green_api_url', 'green_media_url'),
-            'classes': ('collapse',)
+            'classes': ('collapse',),
+            'description': mark_safe(
+                'Только для WhatsApp и личного MAX. idInstance и apiTokenInstance находятся в '
+                '<a href="https://console.green-api.com/" target="_blank" rel="noopener">личном кабинете GREEN-API</a>. '
+                'После сохранения выберите действие «Настроить webhook».'
+            ),
         }),
         ('Метаданные', {
-            'fields': ('telegram_user_id', 'first_name', 'last_name', 'username')
+            'fields': ('telegram_user_id', 'first_name', 'last_name', 'username'),
+            'description': 'Заполняются автоматически после подключения аккаунта.'
         }),
         ('Ошибки', {
             'fields': ('last_error', 'error_count'),
-            'classes': ('collapse',)
+            'classes': ('collapse',),
+            'description': 'Служебная диагностика. Поля обновляются автоматически.'
         }),
         ('Временные метки', {
             'fields': ('created_at', 'updated_at', 'last_activity')
@@ -81,6 +242,12 @@ class TelegramAccountAdmin(admin.ModelAdmin):
             sections.append(self.fieldsets[3])
         sections.extend([self.fieldsets[5], self.fieldsets[6]])
         return tuple(sections)
+
+    def get_readonly_fields(self, request, obj=None):
+        fields = list(super().get_readonly_fields(request, obj))
+        if obj is not None:
+            fields.append('account_type')
+        return fields
     @admin.action(description='Настроить webhook выбранных WhatsApp/MAX аккаунтов в GREEN-API')
     def configure_green_api_webhooks(self, request, queryset):
         from .services.whatsapp_client import GreenAPIClient
@@ -595,6 +762,21 @@ class OutboundDeliveryAdmin(admin.ModelAdmin):
     search_fields = ['text', 'last_error', 'provider_message_id']
     readonly_fields = ['idempotency_key', 'attempts', 'provider_message_id', 'created_message', 'created_at', 'updated_at']
     raw_id_fields = ['chat', 'reply_to_message', 'requested_by']
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(HistoryImportJob)
+class HistoryImportJobAdmin(admin.ModelAdmin):
+    list_display = ['id', 'kind', 'status', 'account', 'chat', 'progress_current', 'created_at', 'finished_at']
+    list_filter = ['kind', 'status', 'created_at']
+    search_fields = ['account__name', 'chat__title', 'error']
+    readonly_fields = [
+        'kind', 'status', 'account', 'chat', 'requested_by', 'parameters',
+        'progress_current', 'progress_total', 'result', 'error',
+        'created_at', 'started_at', 'finished_at',
+    ]
 
     def has_add_permission(self, request):
         return False

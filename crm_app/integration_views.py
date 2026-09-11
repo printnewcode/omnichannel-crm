@@ -93,31 +93,9 @@ class WhatsAppWebhookView(APIView):
 
     @staticmethod
     def _content(message_data):
-        kind = message_data.get('typeMessage', 'unknown')
-        text_data = message_data.get('textMessageData') or {}
-        extended = message_data.get('extendedTextMessageData') or {}
-        file_data = message_data.get('fileMessageData') or message_data.get('stickerMessageData') or {}
-        if kind == 'textMessage':
-            return text_data.get('textMessage', ''), None, text_data
-        if kind in {'extendedTextMessage', 'quotedMessage'}:
-            return extended.get('text') or extended.get('textMessage') or '', None, extended
-        if kind in {'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage'}:
-            return file_data.get('caption') or '', file_data.get('downloadUrl'), file_data
-        if kind == 'locationMessage':
-            data = message_data.get('locationMessageData') or {}
-            label = data.get('nameLocation') or data.get('address') or 'Location'
-            return f"{label}: {data.get('latitude')}, {data.get('longitude')}", None, data
-        if kind in {'contactMessage', 'contactsArrayMessage'}:
-            data = message_data.get('contactMessageData') or message_data.get('contactsArrayMessageData') or {}
-            return data.get('displayName') or 'Contact', None, data
-        if kind == 'reactionMessage':
-            data = message_data.get('reactionMessageData') or {}
-            return data.get('text') or data.get('emoji') or '', None, data
-        for key in ('buttonsResponseMessageData', 'templateButtonReplyMessage', 'listResponseMessageData'):
-            data = message_data.get(key)
-            if data:
-                return data.get('selectedDisplayText') or data.get('selectedButtonId') or data.get('title') or '', None, data
-        return '', None, message_data
+        from .services.message_content import normalize_green_message
+        normalized = normalize_green_message(message_data)
+        return normalized['text'], normalized['download_url'], normalized['content']
 
     def get(self, request, account_id):
         try:
@@ -155,13 +133,45 @@ class WhatsAppWebhookView(APIView):
             return Response({'status': 'ignored', 'processed': 0})
 
         webhook_type = payload.get('typeWebhook')
-        if webhook_type == 'incomingMessageReceived':
+        message_data = payload.get('messageData')
+        message_data = message_data if isinstance(message_data, dict) else {}
+        if (
+            webhook_type in {'incomingMessageReceived', 'outgoingMessageReceived', 'outgoingAPIMessageReceived'}
+            and message_data.get('typeMessage') == 'reactionMessage'
+        ):
+            from .services.reactions import set_actor_reaction
+
             sender = payload.get('senderData') or {}
-            message_data = payload.get('messageData') or {}
+            sender = sender if isinstance(sender, dict) else {}
+            chat_id = sender.get('chatId') or sender.get('sender') or payload.get('chatId')
+            quoted = message_data.get('quotedMessage') or {}
+            quoted = quoted if isinstance(quoted, dict) else {}
+            target_id = quoted.get('idMessage') or quoted.get('stanzaId')
+            emoji, _, _ = self._content(message_data)
+            target = Message.objects.filter(
+                chat__telegram_account=account,
+                chat__metadata__external_chat_id=str(chat_id),
+                external_message_id=str(target_id),
+            ).first() if chat_id and target_id else None
+            if target:
+                actor = 'self' if webhook_type != 'incomingMessageReceived' else f"peer:{sender.get('sender') or 'remote'}"
+                target = set_actor_reaction(target.id, actor, emoji, chosen=actor == 'self')
+                publish_message(target.id)
+            return Response({'status': 'accepted', 'processed': int(bool(target))})
+
+        message_webhook_types = {
+            'incomingMessageReceived',
+            'outgoingMessageReceived',
+            'outgoingAPIMessageReceived',
+        }
+        if webhook_type in message_webhook_types:
+            is_outgoing = webhook_type != 'incomingMessageReceived'
+            sender = payload.get('senderData') or {}
+            sender = sender if isinstance(sender, dict) else {}
             chat_id = sender.get('chatId') or sender.get('sender')
             raw_chat_type = str(sender.get('chatType') or '').lower()
             if account.account_type == TelegramAccount.AccountType.MAX:
-                if raw_chat_type not in {'user', 'group'}:
+                if raw_chat_type not in {'user', 'group', 'bot'}:
                     logger.info('Ignored MAX %s chat %s on account %s', raw_chat_type or 'unknown', chat_id, account.id)
                     return Response({'status': 'ignored', 'processed': 0})
                 # GREEN-API MAX group identifiers are negative. Keep this fallback because
@@ -171,7 +181,7 @@ class WhatsAppWebhookView(APIView):
                 chat_id_text = str(chat_id or '').lower()
                 if chat_id_text.endswith('@g.us'):
                     chat_type = 'group'
-                elif chat_id_text.endswith('@c.us'):
+                elif chat_id_text.endswith(('@c.us', '@lid')):
                     chat_type = 'private'
                 else:
                     logger.info('Ignored WhatsApp non-conversation chat %s on account %s', chat_id, account.id)
@@ -184,39 +194,66 @@ class WhatsAppWebhookView(APIView):
             message_id = payload.get('idMessage')
             if not chat_id or not message_id:
                 return Response({'error': 'Missing chatId or idMessage'}, status=status.HTTP_400_BAD_REQUEST)
-            text, download_url, content = self._content(message_data)
+            from .services.message_content import normalize_green_message
+            normalized = normalize_green_message(message_data)
+            text, download_url, content = (
+                normalized['text'], normalized['download_url'], normalized['content']
+            )
             try:
                 event_time = datetime.fromtimestamp(int(payload.get('timestamp')), tz=timezone.get_current_timezone())
             except (TypeError, ValueError, OSError):
                 event_time = timezone.now()
-            raw_type = message_data.get('typeMessage', 'unknown')
+            raw_type = normalized['raw_type']
+            is_mutation = raw_type in {'editedMessage', 'deletedMessage'}
+            target_message_id = (
+                content.get('stanzaId') or content.get('idMessage')
+            ) if is_mutation else None
             quoted = message_data.get('quotedMessage') or (message_data.get('extendedTextMessageData') or {}).get('quotedMessage') or {}
             message, created, _ = ingest_provider_message(
                 account=account,
                 external_chat_id=chat_id,
-                external_message_id=message_id,
+                external_message_id=target_message_id or message_id,
                 text=text,
                 sender_id=sender.get('sender'),
-                sender_name=sender.get('senderName') or sender.get('senderContactName') or sender.get('chatName'),
+                # For outgoing webhooks senderName is the connected account;
+                # chatName is the peer visible in the conversation list.
+                sender_name=(
+                    sender.get('chatName') or sender.get('senderContactName')
+                    if is_outgoing else
+                    sender.get('senderName') or sender.get('senderContactName') or sender.get('chatName')
+                ),
+                contact_phone=(
+                    sender.get('senderPhoneNumber')
+                    or (str(chat_id).split('@', 1)[0] if str(chat_id).lower().endswith('@c.us') else None)
+                ),
                 occurred_at=event_time,
-                message_type={
-                    'imageMessage': 'photo', 'videoMessage': 'video', 'audioMessage': 'voice',
-                    'documentMessage': 'document', 'stickerMessage': 'sticker',
-                    'locationMessage': 'location', 'contactMessage': 'contact',
-                    'contactsArrayMessage': 'contact', 'reactionMessage': 'text',
-                    'textMessage': 'text', 'extendedTextMessage': 'text', 'quotedMessage': 'text',
-                }.get(raw_type, 'other'),
+                message_type=normalized['message_type'],
                 media_file_id=message_id if download_url else None,
                 reply_to_external_message_id=quoted.get('idMessage') or quoted.get('stanzaId'),
                 metadata={
                     'raw_type': raw_type, 'provider_content': content,
+                    'special_content': normalized['special_content'],
+                    'forward_info': normalized['forward_info'],
                     'download_url': download_url, 'external_chat_id': chat_id,
+                    'green_webhook_type': webhook_type,
                 },
                 chat_type=chat_type,
                 is_bot=peer_is_bot,
+                is_outgoing=is_outgoing,
+                status=Message.MessageStatus.SENT if is_outgoing else Message.MessageStatus.RECEIVED,
+                update_existing=is_mutation,
             )
             if created and download_url:
                 download_green_api_media_task.delay(message.id)
+            if created:
+                from .services.ai_assistant import register_incoming_message, register_provider_outgoing
+                if is_outgoing:
+                    register_provider_outgoing(
+                        message.id,
+                        api_message=webhook_type == 'outgoingAPIMessageReceived',
+                    )
+                else:
+                    register_incoming_message(message.id)
             TelegramAccount.objects.filter(pk=account.pk).update(last_activity=timezone.now(), last_error='')
             return Response({'status': 'accepted', 'processed': 1})
 
@@ -236,8 +273,16 @@ class WhatsAppWebhookView(APIView):
         if webhook_type == 'stateInstanceChanged':
             state = payload.get('stateInstance') or ''
             TelegramAccount.objects.filter(pk=account.pk).update(
+                status=(
+                    TelegramAccount.AccountStatus.ACTIVE
+                    if state == 'authorized'
+                    else TelegramAccount.AccountStatus.ERROR
+                ),
                 last_activity=timezone.now(),
-                last_error='' if state == 'authorized' else f'GREEN-API instance state: {state}',
+                last_error=(
+                    '' if state == 'authorized'
+                    else f'GREEN-API: состояние инстанса — {state or "неизвестно"}'
+                ),
             )
         return Response({'status': 'accepted', 'processed': 0})
 

@@ -4,6 +4,7 @@
 """
 import logging
 import asyncio
+import requests
 from typing import Optional
 from django.utils import timezone
 from django.conf import settings
@@ -22,6 +23,27 @@ class MessageRouter:
     
     def __init__(self):
         self.client_manager = TelegramClientManager()
+
+    def send_reaction(self, message: MessageModel, emoji: str) -> bool:
+        account = message.chat.telegram_account
+        if account.account_type == TelegramAccount.AccountType.PERSONAL:
+            if not message.telegram_id:
+                return False
+            return self.client_manager.send_reaction_sync(
+                account.id, message.chat.telegram_id, message.telegram_id, emoji
+            )
+        if account.account_type == TelegramAccount.AccountType.BOT and account.bot_token and not account.bridge_url:
+            response = requests.post(
+                f'https://api.telegram.org/bot{account.bot_token}/setMessageReaction',
+                json={
+                    'chat_id': message.chat.telegram_id,
+                    'message_id': message.telegram_id,
+                    'reaction': [{'type': 'emoji', 'emoji': emoji}],
+                },
+                timeout=30,
+            )
+            return bool(response.ok and (response.json() or {}).get('ok'))
+        return False
     
     async def send_reply_async(
         self,
@@ -452,16 +474,43 @@ class MessageRouter:
             TelegramAccount.AccountType.PERSONAL,
             TelegramAccount.AccountType.BOT,
         }
-        return MessageModel.objects.create(
-            telegram_id=int(telegram_message_id) if is_telegram else None,
-            external_message_id=None if is_telegram else str(telegram_message_id),
-            chat=chat,
-            text=text,
-            message_type=message_type,
-            status=MessageModel.MessageStatus.SENT,
-            is_outgoing=True,
-            telegram_date=timezone.now(),
-            reply_to_message=reply_to_message,
-            media_file_path=media_file_path,
-            metadata={}
+        lookup = {'chat': chat}
+        if is_telegram:
+            lookup['telegram_id'] = int(telegram_message_id)
+        else:
+            lookup['external_message_id'] = str(telegram_message_id)
+        message, was_created = MessageModel.objects.get_or_create(
+            **lookup,
+            defaults={
+                'text': text,
+                'message_type': message_type,
+                'status': MessageModel.MessageStatus.SENT,
+                'is_outgoing': True,
+                'telegram_date': timezone.now(),
+                'reply_to_message': reply_to_message,
+                'media_file_path': media_file_path,
+                'metadata': {},
+            },
         )
+        if not was_created:
+            update_fields = []
+            for field, value in (
+                ('status', MessageModel.MessageStatus.SENT),
+                ('is_outgoing', True),
+            ):
+                if getattr(message, field) != value:
+                    setattr(message, field, value)
+                    update_fields.append(field)
+            if text and not message.text:
+                message.text = text
+                update_fields.append('text')
+            if media_file_path and not message.media_file_path:
+                message.media_file_path = media_file_path
+                update_fields.append('media_file_path')
+            if reply_to_message and not message.reply_to_message_id:
+                message.reply_to_message = reply_to_message
+                update_fields.append('reply_to_message')
+            if update_fields:
+                message.save(update_fields=[*update_fields, 'updated_at'])
+        message._outbox_was_created = was_created
+        return message

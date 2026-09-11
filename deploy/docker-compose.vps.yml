@@ -1,3 +1,9 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   db:
     image: mysql:8.0
@@ -7,19 +13,28 @@ services:
       MYSQL_USER: ${DB_USER}
       MYSQL_PASSWORD: ${DB_PASSWORD}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --innodb-buffer-pool-size=128M --max-connections=100 --performance-schema=OFF
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --innodb-buffer-pool-size=192M --innodb-buffer-pool-instances=1 --max-connections=60 --performance-schema=OFF
+    mem_limit: 384m
+    cpus: "0.35"
+    pids_limit: 100
+    logging: *default-logging
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 15s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
     command: redis-server --appendonly yes
+    mem_limit: 48m
+    cpus: "0.02"
+    pids_limit: 50
+    logging: *default-logging
     volumes:
       - redis_data:/data
     healthcheck:
@@ -29,8 +44,7 @@ services:
       retries: 20
 
   migrate:
-    build:
-      context: ..
+    image: omnichannel-crm:latest
     env_file:
       - ../.env
     environment:
@@ -39,7 +53,15 @@ services:
       DB_PORT: "3306"
       REDIS_URL: redis://redis:6379/0
       RUN_TELETHON_CLIENTS: "0"
-    command: sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput"
+    mem_limit: 192m
+    cpus: "0.20"
+    pids_limit: 100
+    logging: *default-logging
+    command: >
+      sh -c "until python manage.py migrate --noinput; do
+        echo 'MySQL is not ready yet; retrying in 5 seconds';
+        sleep 5;
+      done && python manage.py collectstatic --noinput"
     depends_on:
       db:
         condition: service_healthy
@@ -53,6 +75,7 @@ services:
   web:
     build:
       context: ..
+    image: omnichannel-crm:latest
     restart: unless-stopped
     env_file:
       - ../.env
@@ -62,9 +85,26 @@ services:
       DB_PORT: "3306"
       REDIS_URL: redis://redis:6379/0
       RUN_TELETHON_CLIENTS: "0"
+    mem_limit: 256m
+    cpus: "0.30"
+    pids_limit: 100
+    logging: *default-logging
     command: daphne -b 0.0.0.0 -p 8000 CRM.asgi:application
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8001:8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import http.client, os;
+          host=(os.environ.get('DOMAIN') or os.environ.get('ALLOWED_HOSTS','localhost').split(',')[0]).replace('https://','').replace('http://','').split('/')[0];
+          c=http.client.HTTPConnection('127.0.0.1',8000,timeout=8);
+          c.request('GET','/api/health/',headers={'Host':host,'X-Forwarded-Proto':'https'});
+          r=c.getresponse(); raise SystemExit(0 if r.status == 200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -76,8 +116,7 @@ services:
 
   connector:
     stop_grace_period: 30s
-    build:
-      context: ..
+    image: omnichannel-crm:latest
     restart: unless-stopped
     env_file:
       - ../.env
@@ -87,7 +126,11 @@ services:
       DB_PORT: "3306"
       REDIS_URL: redis://redis:6379/0
       RUN_TELETHON_CLIENTS: "0"
-    command: python manage.py start_telegram_accounts --reconcile-interval 900 --account-refresh-interval 10
+    mem_limit: 256m
+    cpus: "0.15"
+    pids_limit: 100
+    logging: *default-logging
+    command: python manage.py start_telegram_accounts --reconcile-interval 900 --account-refresh-interval 60
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -98,8 +141,7 @@ services:
 
   worker:
     stop_grace_period: 30s
-    build:
-      context: ..
+    image: omnichannel-crm:latest
     restart: unless-stopped
     env_file:
       - ../.env
@@ -109,7 +151,11 @@ services:
       DB_PORT: "3306"
       REDIS_URL: redis://redis:6379/0
       RUN_TELETHON_CLIENTS: "0"
-    command: celery -A CRM worker --loglevel=INFO --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=100
+    mem_limit: 224m
+    cpus: "0.10"
+    pids_limit: 100
+    logging: *default-logging
+    command: celery -A CRM worker --loglevel=INFO --concurrency=1 --prefetch-multiplier=1 --max-tasks-per-child=50 --max-memory-per-child=140000
     depends_on:
       migrate:
         condition: service_completed_successfully

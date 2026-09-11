@@ -9,10 +9,49 @@ from django.conf import settings
 from django.db.models import F
 from typing import Optional
 import requests
-from .models import Message, Chat, TelegramAccount
+from datetime import datetime
+from .models import Message, Chat, TelegramAccount, HistoryImportJob
 from .services.realtime import publish_message
 
 logger = logging.getLogger(__name__)
+
+
+def _set_media_download_state(message_id: int, state: str, error: str = ''):
+    try:
+        message = Message.objects.only('id', 'metadata').get(pk=message_id)
+    except Message.DoesNotExist:
+        return
+    metadata = dict(message.metadata or {})
+    metadata['media_download'] = {
+        'status': state,
+        'error': error[:1000],
+        'updated_at': timezone.now().isoformat(),
+    }
+    Message.objects.filter(pk=message_id).update(metadata=metadata)
+
+
+@shared_task(bind=True, max_retries=0, soft_time_limit=180, time_limit=210)
+def download_telegram_media_task(self, message_id: int):
+    """Download old Telegram media without blocking the Daphne web process."""
+    from .services.telegram_client_manager import TelegramClientManager
+
+    _set_media_download_state(message_id, 'downloading')
+    try:
+        message = Message.objects.select_related('chat__telegram_account').get(pk=message_id)
+        account = message.chat.telegram_account
+        if account.account_type != TelegramAccount.AccountType.PERSONAL:
+            raise ValueError('Фоновая загрузка доступна только для личного Telegram-аккаунта.')
+        result = TelegramClientManager().download_media_by_message_id_sync(message, timeout=175)
+        if not result:
+            raise RuntimeError('Telegram не вернул файл.')
+        _set_media_download_state(message_id, 'ready')
+        publish_message(message_id)
+        return result
+    except Exception as exc:
+        logger.exception('Could not download Telegram media for message %s', message_id)
+        _set_media_download_state(message_id, 'failed', str(exc))
+        publish_message(message_id)
+        return None
 
 
 @shared_task(bind=True, max_retries=3)
@@ -115,7 +154,13 @@ def process_incoming_message(
             )
 
         publish_message(message.id)
-        if media_file_id and message_type in ['photo', 'video', 'voice', 'document']:
+        if created:
+            from .services.ai_assistant import register_incoming_message, register_provider_outgoing
+            if message.is_outgoing:
+                register_provider_outgoing(message.id, api_message=True)
+            else:
+                register_incoming_message(message.id)
+        if media_file_id and message_type in ['photo', 'video', 'voice', 'document', 'sticker']:
             download_media.delay(
                 account_id=account_id,
                 message_id=message.id,
@@ -165,7 +210,7 @@ def download_media(
             return
         
         # Создание директории для медиа
-        media_dir = settings.BASE_DIR / 'media' / 'telegram' / message_type
+        media_dir = settings.MEDIA_ROOT / 'telegram' / message_type
         os.makedirs(media_dir, exist_ok=True)
         
         # Для Bot API используем getFile метод
@@ -206,7 +251,7 @@ def download_media(
                         f.write(chunk)
                 
                 # Обновление сообщения
-                message.media_file_path = str(local_path.relative_to(settings.BASE_DIR))
+                message.media_file_path = str(local_path.relative_to(settings.MEDIA_ROOT))
                 message.save(update_fields=['media_file_path'])
                 
                 logger.info(f"Downloaded media for message {message_id}: {local_path}")
@@ -243,6 +288,113 @@ def download_green_api_media_task(self, message_id: int):
     except Exception as exc:
         logger.exception('Could not download GREEN-API media for message %s', message_id)
         raise self.retry(exc=exc, countdown=min(300, 15 * (2 ** self.request.retries)))
+
+
+@shared_task(bind=True, max_retries=0, soft_time_limit=50, time_limit=60)
+def process_ai_reply_task(self, chat_id: int, generation: int, attempt: int = 0):
+    """Run a deduplicated AI reply without blocking webhook or connector processes."""
+    from .services.ai_assistant import process_ai_reply, queue_failure_fallback
+
+    try:
+        result = process_ai_reply(chat_id, generation)
+        if result.startswith('reschedule:'):
+            delay = max(5, min(int(result.split(':', 1)[1]), 3600))
+            process_ai_reply_task.apply_async(args=[chat_id, generation, attempt], countdown=delay)
+        return result
+    except Exception as exc:
+        logger.exception('AI reply failed for chat %s generation %s', chat_id, generation)
+        if attempt < 2:
+            delay = 4 if 'VSEGPT_RATE_LIMIT' in str(exc) else 15 * (2 ** attempt)
+            process_ai_reply_task.apply_async(args=[chat_id, generation, attempt + 1], countdown=delay)
+            return 'retry'
+        return queue_failure_fallback(chat_id, generation, str(exc))
+
+
+@shared_task(bind=True, max_retries=0, soft_time_limit=180, time_limit=210)
+def sync_google_contacts_task(self, integration_id: int):
+    """Synchronize Google contacts once and perform all chat matching locally."""
+    from .models import GoogleContactsIntegration
+    from .services.google_contacts import sync_contacts
+
+    try:
+        result = sync_contacts(integration_id)
+        GoogleContactsIntegration.objects.filter(pk=integration_id).update(
+            sync_in_progress=False,
+            last_result=result,
+            last_error='',
+        )
+        return result
+    except Exception as exc:
+        logger.exception('Google Contacts sync failed for integration %s', integration_id)
+        GoogleContactsIntegration.objects.filter(pk=integration_id).update(
+            sync_in_progress=False,
+            last_error=str(exc)[:2000],
+        )
+        return {'error': str(exc)}
+
+
+@shared_task
+def run_history_import(job_id: int):
+    """Import history in a worker so web requests stay short and memory stays bounded."""
+    from .services.history_import import (
+        discover_green, discover_telegram, import_green_history, import_telegram_history,
+    )
+
+    job = HistoryImportJob.objects.select_related(
+        'account', 'chat', 'chat__telegram_account',
+    ).get(pk=job_id)
+    job.status = HistoryImportJob.Status.RUNNING
+    job.started_at = timezone.now()
+    job.error = ''
+    job.save(update_fields=['status', 'started_at', 'error'])
+    try:
+        media_ids = []
+        if job.kind == HistoryImportJob.Kind.CHAT_HISTORY:
+            requested_count = job.parameters.get('count')
+            count = max(1, min(int(requested_count), 10000)) if requested_count else None
+            job.progress_total = count if requested_count else None
+            job.save(update_fields=['progress_total'])
+            if job.account.account_type == TelegramAccount.AccountType.PERSONAL:
+                # Telethon streams iter_messages, so "all" does not build the
+                # complete history in RAM.
+                created, processed = import_telegram_history(job.chat, count)
+            elif job.account.account_type in {TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX}:
+                # GREEN-API returns one response rather than pages. Keep that
+                # response bounded on the small production VPS.
+                created, processed, media_ids = import_green_history(job.chat, count or 10000)
+            else:
+                raise ValueError('Загрузка истории для Telegram-ботов недоступна.')
+            result = {'created_messages': created, 'processed_messages': processed}
+            job.progress_current = processed
+        else:
+            since = datetime.fromisoformat(job.parameters['since']) if job.parameters.get('since') else None
+            if since and timezone.is_naive(since):
+                since = timezone.make_aware(since)
+            if job.account.account_type == TelegramAccount.AccountType.PERSONAL:
+                discovered, imported = discover_telegram(job.account, since, per_chat=5)
+            elif job.account.account_type in {TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX}:
+                discovered, imported, media_ids, provider_stats = discover_green(job.account, since, per_chat=5)
+            else:
+                raise ValueError('Загрузка диалогов для Telegram-ботов недоступна.')
+            result = {'created_chats': discovered, 'created_messages': imported}
+            if job.account.account_type in {TelegramAccount.AccountType.WHATSAPP, TelegramAccount.AccountType.MAX}:
+                result.update(provider_stats)
+            job.progress_current = discovered
+
+        for message_id in media_ids:
+            download_green_api_media_task.delay(message_id)
+        job.status = HistoryImportJob.Status.COMPLETED
+        job.result = result
+        job.finished_at = timezone.now()
+        job.save(update_fields=['status', 'result', 'progress_current', 'finished_at'])
+        return result
+    except Exception as exc:
+        logger.exception('History import job %s failed', job_id)
+        job.status = HistoryImportJob.Status.FAILED
+        job.error = str(exc)[:2000]
+        job.finished_at = timezone.now()
+        job.save(update_fields=['status', 'error', 'finished_at'])
+        raise
 
 @shared_task
 def cleanup_old_messages():

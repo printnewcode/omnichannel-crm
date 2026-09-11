@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
+from telethon import types
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, TransactionTestCase, override_settings
@@ -11,7 +12,9 @@ from django.urls import reverse
 from django.utils import timezone
 
 from crm_app.models import Chat, Message, OutboundDelivery, TelegramAccount
+from crm_app.serializers import MessageSerializer
 from crm_app.services.telegram_client_manager import TelegramClientManager
+from crm_app.tasks import download_telegram_media_task
 
 
 class AttachmentApiTests(TestCase):
@@ -99,7 +102,8 @@ class AttachmentApiTests(TestCase):
         self.assertEqual(text_response.status_code, 200)
         self.assertEqual([item['telegram_id'] for item in text_response.json()['results']], [201])
         self.assertEqual([item['telegram_id'] for item in caption_response.json()['results']], [202])
-    def test_download_error_is_specific(self):
+    @patch('crm_app.views.download_telegram_media_task.delay')
+    def test_telegram_download_is_queued_without_blocking_web(self, delay):
         message = Message.objects.create(
             chat=self.chat,
             telegram_id=123,
@@ -107,21 +111,88 @@ class AttachmentApiTests(TestCase):
             status=Message.MessageStatus.RECEIVED,
             telegram_date=timezone.now(),
         )
-        with patch.object(
-            TelegramClientManager,
-            'download_media_by_message_id_sync',
-            side_effect=RuntimeError('Telegram media expired'),
-        ):
-            response = self.client.get(
-                reverse('message-download-media', kwargs={'pk': message.pk})
-            )
+        response = self.client.get(
+            reverse('message-download-media', kwargs={'pk': message.pk})
+        )
 
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()['status'], 'queued')
+        delay.assert_called_once_with(message.pk)
+        message.refresh_from_db()
+        self.assertEqual(
+            MessageSerializer(message).data['metadata']['media_download']['status'],
+            'queued',
+        )
+        detail = self.client.get(reverse('message-detail', kwargs={'pk': message.pk}))
+        self.assertEqual(detail.json()['metadata']['media_download']['status'], 'queued')
+
+        second = self.client.get(
+            reverse('message-download-media', kwargs={'pk': message.pk}),
+            {'poll': '1'},
+        )
+        self.assertEqual(second.status_code, 202)
+        delay.assert_called_once_with(message.pk)
+
+    @patch.object(
+        TelegramClientManager,
+        'download_media_by_message_id_sync',
+        side_effect=RuntimeError('Telegram media expired'),
+    )
+    def test_background_download_exposes_provider_error(self, _download):
+        message = Message.objects.create(
+            chat=self.chat, telegram_id=124,
+            message_type=Message.MessageType.PHOTO,
+            status=Message.MessageStatus.RECEIVED,
+            telegram_date=timezone.now(),
+        )
+
+        download_telegram_media_task.run(message.pk)
+        message.refresh_from_db()
+
+        self.assertEqual(message.metadata['media_download']['status'], 'failed')
+        self.assertIn('Telegram media expired', message.metadata['media_download']['error'])
+        response = self.client.get(
+            reverse('message-download-media', kwargs={'pk': message.pk}),
+            {'poll': '1'},
+        )
         self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()['code'], 'provider_download_failed')
         self.assertIn('Telegram media expired', response.json()['error'])
 
 
 class TelegramIncomingMediaTests(TransactionTestCase):
+    def test_private_peer_is_resolved_without_scanning_all_dialogs(self):
+        account = TelegramAccount.objects.create(
+            name='Fast peer account',
+            account_type=TelegramAccount.AccountType.PERSONAL,
+            status=TelegramAccount.AccountStatus.ACTIVE,
+        )
+        chat = Chat.objects.create(
+            telegram_id=99904,
+            telegram_account=account,
+            chat_type=Chat.ChatType.PRIVATE,
+        )
+
+        class FakeClient:
+            async def get_input_entity(self, peer):
+                self.assert_peer = peer
+                return types.InputPeerUser(99904, 777888)
+
+            async def iter_dialogs(self):
+                raise AssertionError('Full dialog scan must not run')
+                yield
+
+        peer = async_to_sync(TelegramClientManager()._resolve_download_peer)(
+            FakeClient(),
+            {
+                'chat_metadata': {}, 'chat_type': Chat.ChatType.PRIVATE,
+                'chat_username': '', 'chat_telegram_id': 99904, 'chat_id': chat.id,
+            },
+        )
+
+        chat.refresh_from_db()
+        self.assertIsInstance(peer, types.InputPeerUser)
+        self.assertEqual(chat.metadata['telegram_peer']['access_hash'], '777888')
+
     def test_connected_client_download_preserves_filename(self):
         with tempfile.TemporaryDirectory() as temp_media:
             account = TelegramAccount.objects.create(
@@ -161,3 +232,68 @@ class TelegramIncomingMediaTests(TransactionTestCase):
             self.assertTrue(path.endswith('/source-name.svg'))
             self.assertEqual(record.metadata['original_filename'], 'source-name.svg')
             self.assertTrue((Path(temp_media) / path).is_file())
+
+    def test_lazy_download_does_not_touch_deferred_fields_in_async_context(self):
+        with tempfile.TemporaryDirectory() as temp_media:
+            account = TelegramAccount.objects.create(
+                name='Deferred media account',
+                account_type=TelegramAccount.AccountType.PERSONAL,
+                status=TelegramAccount.AccountStatus.ACTIVE,
+                api_id=12345,
+                api_hash='hash',
+                session_string='',
+            )
+            chat = Chat.objects.create(
+                telegram_id=99903,
+                telegram_account=account,
+                chat_type=Chat.ChatType.PRIVATE,
+                metadata={'telegram_peer': {'type': 'user', 'access_hash': '123456'}},
+            )
+            record = Message.objects.create(
+                chat=chat,
+                telegram_id=654,
+                message_type=Message.MessageType.PHOTO,
+                metadata={'existing': 'value'},
+                status=Message.MessageStatus.RECEIVED,
+                telegram_date=timezone.now(),
+            )
+            deferred = Message.objects.select_related('chat__telegram_account').only(
+                'id', 'telegram_id', 'message_type', 'chat__id',
+                'chat__telegram_id', 'chat__telegram_account__id',
+            ).get(pk=record.pk)
+            telegram_message = SimpleNamespace(
+                id=654,
+                media=object(),
+                file=SimpleNamespace(name='telegram-photo.jpg'),
+            )
+
+            class FakeClient:
+                async def connect(self):
+                    return None
+
+                async def disconnect(self):
+                    return None
+
+                async def get_dialogs(self, limit=None):
+                    return []
+
+                async def get_entity(self, chat_id):
+                    return chat_id
+
+                async def get_messages(self, _entity, ids):
+                    return [telegram_message]
+
+                async def download_media(self, _message, file):
+                    Path(file).write_bytes(b'jpeg')
+                    return file
+
+            manager = TelegramClientManager()
+            with override_settings(MEDIA_ROOT=Path(temp_media)), patch.object(
+                manager, '_create_client', return_value=FakeClient()
+            ):
+                path = async_to_sync(manager._download_with_fresh_client)(deferred)
+
+            record.refresh_from_db()
+            self.assertTrue(path.endswith('/telegram-photo.jpg'))
+            self.assertEqual(record.metadata['existing'], 'value')
+            self.assertEqual(record.metadata['original_filename'], 'telegram-photo.jpg')

@@ -3,6 +3,7 @@
 Обрабатывает динамическое создание, запуск и остановку клиентов
 """
 import asyncio
+import concurrent.futures
 import logging
 import os
 import threading
@@ -19,9 +20,11 @@ from django.utils.text import get_valid_filename
 from django.db import close_old_connections
 from asgiref.sync import sync_to_async
 from channels.db import database_sync_to_async
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, functions, types, utils
 from telethon.network.connection.tcpobfuscated import ConnectionTcpObfuscated
 from telethon.sessions import StringSession
+from telethon.tl.functions.channels import InviteToChannelRequest
+from telethon.tl.functions.messages import AddChatUserRequest
 from telethon.errors import (
     FloodWaitError,
     RPCError,
@@ -36,6 +39,7 @@ from telethon.errors import (
     ApiIdInvalidError,
 )
 from ..models import TelegramAccount
+from .message_content import telegram_forward_info, telegram_special_content
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +68,7 @@ class TelegramClientManager:
         if not hasattr(self, '_initialized'):
             self._initialized = True
             self._lock = asyncio.Lock()
+            self._media_download_locks = {}
     
     async def _get_or_create_loop(self) -> asyncio.AbstractEventLoop:
         """Получить или создать event loop"""
@@ -236,6 +241,10 @@ class TelegramClientManager:
                 self._create_edit_handler(account),
                 events.MessageEdited()
             )
+            client.add_event_handler(
+                self._create_reaction_handler(account),
+                events.Raw(types.UpdateMessageReactions),
+            )
             
             # Сохранение клиента и запуск задачи прослушивания
             self._clients[account.id] = client
@@ -358,6 +367,30 @@ class TelegramClientManager:
         except Exception as e:
             logger.exception(f"Error in send_message_sync: {e}")
             return None
+
+    def send_reaction_sync(self, account_id: int, chat_id: int, message_id: int, emoji: str) -> bool:
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self.send_reaction(account_id, chat_id, message_id, emoji), loop
+        )
+        return bool(future.result(timeout=30))
+
+    async def send_reaction(self, account_id: int, chat_id: int, message_id: int, emoji: str) -> bool:
+        client = self._clients.get(account_id)
+        if not client:
+            logger.error('Client for account %s not running', account_id)
+            return False
+        try:
+            await client(functions.messages.SendReactionRequest(
+                peer=chat_id,
+                msg_id=int(message_id),
+                reaction=[types.ReactionEmoji(emoticon=emoji)],
+                big=False,
+            ))
+            return True
+        except RPCError as exc:
+            logger.error('Telegram reaction failed for message %s: %s', message_id, exc)
+            return False
     
     async def send_message(
         self,
@@ -469,6 +502,7 @@ class TelegramClientManager:
         async def handle_message(event):
             """Обработка входящих сообщений"""
             from ..models import Chat, Message as MessageModel
+            from .reactions import telegram_reaction_summary
             from channels.db import database_sync_to_async
 
             message = event.message
@@ -491,6 +525,10 @@ class TelegramClientManager:
                     chat_type = 'channel'
                 else:
                     chat_type = 'unknown'
+                peer_metadata = self._telegram_peer_metadata(chat_entity)
+                peer_phone = getattr(chat_entity, 'phone', None) or getattr(sender_entity, 'phone', None)
+                if peer_phone:
+                    peer_metadata = {**peer_metadata, 'contact_phone': str(peer_phone)}
 
                 # Получение или создание чата
                 @database_sync_to_async
@@ -504,7 +542,7 @@ class TelegramClientManager:
                             'username': getattr(chat_entity, 'username', None),
                             'first_name': getattr(chat_entity, 'first_name', None),
                             'last_name': getattr(chat_entity, 'last_name', None),
-                            'metadata': {},
+                            'metadata': peer_metadata,
                             'is_bot': chat_type == 'private' and bool(getattr(chat_entity, 'bot', False)),
                         }
                     )
@@ -521,6 +559,9 @@ class TelegramClientManager:
                     if chat.is_bot != peer_is_bot:
                         chat.is_bot = peer_is_bot
                         updated = True
+                    if peer_metadata and not (chat.metadata or {}).get('telegram_peer'):
+                        chat.metadata = {**(chat.metadata or {}), **peer_metadata}
+                        updated = True
 
                     if updated or created:
                         chat.save()
@@ -528,6 +569,9 @@ class TelegramClientManager:
                     return chat, created
 
                 chat, chat_created = await get_or_create_chat()
+                if peer_phone:
+                    from .google_contacts import match_chat_contact
+                    await database_sync_to_async(match_chat_contact)(chat)
 
                 # Определение типа сообщения и медиа
                 message_type = self._get_message_type(message) or 'text'
@@ -554,7 +598,7 @@ class TelegramClientManager:
 
                     # Создание сообщения (дедупликация по telegram_id + chat)
                     try:
-                        message_obj, _ = MessageModel.objects.get_or_create(
+                        message_obj, message_created = MessageModel.objects.get_or_create(
                             telegram_id=message.id,
                             chat=chat,
                             defaults={
@@ -569,7 +613,11 @@ class TelegramClientManager:
                                 'reply_to_message': reply_to_message,
                                 'media_file_id': media_file_id,
                                 'media_caption': getattr(message, 'message', None) if message_type != 'text' else None,
-                                'metadata': {}
+                                'metadata': {
+                                    'reactions': telegram_reaction_summary(getattr(message, 'reactions', None)),
+                                    'special_content': telegram_special_content(message),
+                                    'forward_info': telegram_forward_info(message),
+                                }
                             }
                         )
                     except IntegrityError:
@@ -581,11 +629,11 @@ class TelegramClientManager:
                             )
                         except MessageModel.DoesNotExist:
                             # Если сообщение всё же не существует, пропускаем
-                            return None
+                            return None, False
 
-                    return message_obj
+                    return message_obj, message_created
 
-                message_obj = await create_message_record()
+                message_obj, message_created = await create_message_record()
 
                 # Если сообщение не удалось создать/получить, пропускаем обработку
                 if message_obj is None:
@@ -603,21 +651,55 @@ class TelegramClientManager:
                     chat.last_message_at = message.date
                     if not message.out:
                         chat.unread_count += 1
+                    else:
+                        chat.unread_count = 0
                     chat.save(update_fields=['message_count', 'last_message_at', 'unread_count'])
 
-                await update_chat_stats()
+                if message_created:
+                    await update_chat_stats()
 
                 # Telegram file_id уже сохранен при создании сообщения
 
                 # Единый realtime-канал: чат сразу видят все операторы.
                 from .realtime import publish_message
                 await database_sync_to_async(publish_message)(message_obj.id)
+                from .ai_assistant import register_incoming_message, register_provider_outgoing
+                if message_created:
+                    if message_obj.is_outgoing:
+                        await database_sync_to_async(register_provider_outgoing)(message_obj.id)
+                    else:
+                        await database_sync_to_async(register_incoming_message)(message_obj.id)
                 logger.info(f"Processed incoming message {message.id} for chat {chat.id}")
                 
             except Exception as e:
                 logger.exception(f"Error handling message: {e}")
         
         return handle_message
+
+    def _create_reaction_handler(self, account: TelegramAccount):
+        async def handle_reaction(update):
+            from ..models import Chat, Message as MessageModel
+            from .reactions import set_reaction_summary, telegram_reaction_summary
+            from .realtime import publish_message
+
+            try:
+                chat_id = utils.get_peer_id(update.peer)
+                message = await database_sync_to_async(
+                    MessageModel.objects.filter(
+                        chat__telegram_account=account,
+                        chat__telegram_id=chat_id,
+                        telegram_id=update.msg_id,
+                    ).first
+                )()
+                if not message:
+                    return
+                summary = telegram_reaction_summary(update.reactions)
+                await database_sync_to_async(set_reaction_summary)(message.id, summary)
+                await database_sync_to_async(publish_message)(message.id)
+            except Exception:
+                logger.exception('Failed to process Telegram reaction update for account %s', account.id)
+
+        return handle_reaction
     
     def _get_message_type(self, message) -> str:
         """Определить тип сообщения (Telethon)"""
@@ -637,6 +719,13 @@ class TelegramClientManager:
             return 'location'
         if getattr(message, 'contact', None):
             return 'contact'
+        if getattr(message, 'poll', None):
+            return 'poll'
+        if getattr(message, 'action', None):
+            return 'service'
+        media = getattr(message, 'media', None)
+        if media and media.__class__.__name__ == 'MessageMediaDice':
+            return 'other'
             
         return 'text'
     
@@ -690,6 +779,9 @@ class TelegramClientManager:
             return '.mp4'
         if message_type in {'voice', 'audio'}:
             return '.ogg'
+        telethon_extension = getattr(getattr(message, 'file', None), 'ext', None)
+        if telethon_extension:
+            return telethon_extension
         original = getattr(getattr(message, 'file', None), 'name', None)
         if original:
             return Path(original).suffix or '.bin'
@@ -713,61 +805,163 @@ class TelegramClientManager:
             logger.exception(f"Error getting file_id: {e}")
         return None
 
-    def download_media_by_message_id_sync(self, message) -> Optional[str]:
+    def download_media_by_message_id_sync(self, message, timeout: int = 180) -> Optional[str]:
         """Sync версия для скачивания медиа по message.telegram_id"""
-        import asyncio
-        import concurrent.futures
+        # Pass only the primary key across the sync/async boundary. The object
+        # returned by the API queryset contains deferred fields; touching one
+        # from the Telethon loop would make Django perform synchronous ORM I/O
+        # in an async context.
+        message_id = message.pk
+        loop = self._ensure_background_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self._download_with_fresh_client(message_id), loop,
+        )
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TimeoutError('Telegram не успел подготовить файл. Попробуйте ещё раз позже.')
 
-        # Используем ThreadPoolExecutor для выполнения в фоне
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(self._download_in_background, message)
-            try:
-                return future.result(timeout=30)  # 30 секунд таймаут
-            except concurrent.futures.TimeoutError:
-                raise Exception("Download timeout")
-            except Exception as e:
-                raise e
-
-    def _download_in_background(self, message) -> Optional[str]:
+    def _download_in_background(self, message_id: int) -> Optional[str]:
         """Выполнить скачивание в фоне"""
         try:
-            return self.run_async_sync(self._download_with_fresh_client(message))
+            return self.run_async_sync(self._download_with_fresh_client(message_id))
         except Exception as e:
             logger.error(f"Error in background download: {e}")
             raise
 
-    async def _download_with_fresh_client(self, message) -> Optional[str]:
+    @staticmethod
+    def _telegram_download_context(message_id: int) -> dict:
+        """Load every ORM value needed by async Telegram media download."""
+        from ..models import Message
+
+        message = Message.objects.select_related('chat__telegram_account').get(pk=message_id)
+        account = message.chat.telegram_account
+        return {
+            'message_id': message.id,
+            'telegram_message_id': message.telegram_id,
+            'message_type': message.message_type,
+            'metadata': dict(message.metadata or {}),
+            'chat_telegram_id': message.chat.telegram_id,
+            'chat_id': message.chat.id,
+            'chat_type': message.chat.chat_type,
+            'chat_username': message.chat.username or '',
+            'chat_metadata': dict(message.chat.metadata or {}),
+            'account_id': account.id,
+            'session_string': account.session_string or '',
+            'api_id': account.api_id,
+            'api_hash': account.api_hash,
+        }
+
+    @staticmethod
+    def _store_downloaded_media(message_id: int, relative_path: str, metadata: dict) -> None:
+        from ..models import Message
+
+        Message.objects.filter(pk=message_id).update(
+            media_file_path=relative_path,
+            metadata=metadata,
+            updated_at=timezone.now(),
+        )
+
+    @staticmethod
+    def _telegram_peer_metadata(entity) -> dict:
+        access_hash = getattr(entity, 'access_hash', None)
+        if access_hash is None:
+            return {}
+        if isinstance(entity, (types.User, types.InputPeerUser)):
+            peer_type = 'user'
+        elif isinstance(entity, (types.Channel, types.InputPeerChannel)):
+            peer_type = 'channel'
+        else:
+            return {}
+        return {'telegram_peer': {'type': peer_type, 'access_hash': str(access_hash)}}
+
+    @staticmethod
+    def _store_telegram_peer(chat_id: int, peer_metadata: dict) -> None:
+        from ..models import Chat
+
+        if not peer_metadata:
+            return
+        chat = Chat.objects.only('id', 'metadata').get(pk=chat_id)
+        metadata = dict(chat.metadata or {})
+        metadata.update(peer_metadata)
+        Chat.objects.filter(pk=chat_id).update(metadata=metadata)
+
+    async def _resolve_download_peer(self, client, context: dict):
+        peer = context['chat_metadata'].get('telegram_peer') or {}
+        access_hash = peer.get('access_hash')
+        if access_hash not in (None, ''):
+            if peer.get('type') == 'channel':
+                return types.InputPeerChannel(context['chat_telegram_id'], int(access_hash))
+            return types.InputPeerUser(context['chat_telegram_id'], int(access_hash))
+        if context['chat_type'] == 'group':
+            return types.InputPeerChat(context['chat_telegram_id'])
+        if context['chat_username']:
+            entity = await client.get_entity(context['chat_username'])
+        else:
+            entity = None
+            # Telegram can resolve contacts and users who have messaged the
+            # account using access_hash=0. This avoids walking thousands of
+            # dialogs for the common private-chat case.
+            try:
+                entity = await client.get_input_entity(
+                    types.PeerUser(context['chat_telegram_id'])
+                )
+            except (ValueError, RPCError):
+                entity = None
+            # Existing records may predate persisted access hashes. Scan only
+            # until the requested peer is found, then cache the hash in the DB.
+            if entity is None:
+                async for dialog in client.iter_dialogs():
+                    if getattr(dialog.entity, 'id', None) == context['chat_telegram_id']:
+                        entity = dialog.entity
+                        break
+            if entity is None:
+                raise LookupError('Диалог не найден в подключённом Telegram-аккаунте.')
+        peer_metadata = self._telegram_peer_metadata(entity)
+        if peer_metadata:
+            await database_sync_to_async(self._store_telegram_peer)(
+                context['chat_id'], peer_metadata,
+            )
+        return entity
+
+    async def _download_with_fresh_client(self, message_or_id) -> Optional[str]:
         """Скачать медиа используя новый клиент"""
-        from telethon import TelegramClient
         from telethon.sessions import StringSession
 
-        # Найти аккаунт для этого сообщения
-        account = await sync_to_async(lambda: message.chat.telegram_account)()
+        message_id = getattr(message_or_id, 'pk', message_or_id)
+        context = await database_sync_to_async(self._telegram_download_context)(message_id)
 
-        # Создать новый клиент для скачивания
-        client = self._create_client(StringSession(account.session_string), account.api_id, account.api_hash)
-        await client.connect()
+        lock = self._media_download_locks.setdefault(context['account_id'], asyncio.Lock())
+        await lock.acquire()
+        client = self._create_client(
+            StringSession(context['session_string']),
+            context['api_id'],
+            context['api_hash'],
+        )
 
         try:
-            # Получить сообщение из Telegram по ID
-            logger.info(f"Downloading media for message {message.id} (telegram_id: {message.telegram_id}) in chat {message.chat.telegram_id}")
+            await client.connect()
+            logger.info(
+                'Downloading media for message %s (telegram_id: %s) in chat %s',
+                context['message_id'], context['telegram_message_id'], context['chat_telegram_id'],
+            )
 
-            # A fresh StringSession has no in-memory entity cache. Loading dialogs
-            # restores the access hashes required for private users.
-            await client.get_dialogs(limit=None)
-            chat_entity = await client.get_entity(message.chat.telegram_id)
-            telegram_message = await client.get_messages(chat_entity, ids=[message.telegram_id])
+            chat_entity = await self._resolve_download_peer(client, context)
+            telegram_message = await client.get_messages(chat_entity, ids=[context['telegram_message_id']])
 
             if not telegram_message or not telegram_message[0]:
-                raise Exception(f"Message {message.telegram_id} not found in chat {message.chat.telegram_id}")
+                raise Exception(
+                    f"Message {context['telegram_message_id']} not found in chat {context['chat_telegram_id']}"
+                )
 
             telegram_message = telegram_message[0]
 
             if not telegram_message.media:
-                raise Exception(f"Message {message.telegram_id} has no media")
+                raise Exception(f"Message {context['telegram_message_id']} has no media")
 
-            file_name = self._telegram_media_filename(telegram_message, message.message_type)
-            relative_dir = Path('telegram') / message.message_type / str(message.id)
+            file_name = self._telegram_media_filename(telegram_message, context['message_type'])
+            relative_dir = Path('telegram') / context['message_type'] / str(context['message_id'])
             media_dir = Path(settings.MEDIA_ROOT) / relative_dir
             media_dir.mkdir(parents=True, exist_ok=True)
             local_path = media_dir / file_name
@@ -777,57 +971,58 @@ class TelegramClientManager:
                 raise RuntimeError('Telegram не вернул содержимое файла.')
 
             relative_path = (relative_dir / file_name).as_posix()
-            message.media_file_path = relative_path
-            message.metadata = {
-                **(message.metadata or {}),
+            metadata = {
+                **context['metadata'],
                 'original_filename': file_name,
                 'media_size': local_path.stat().st_size,
             }
-            await database_sync_to_async(message.save)(
-                update_fields=['media_file_path', 'metadata', 'updated_at']
+            await database_sync_to_async(self._store_downloaded_media)(
+                context['message_id'], relative_path, metadata
             )
 
             logger.info(f"Successfully downloaded media to {local_path}")
             return relative_path
 
         finally:
-            await client.disconnect()
+            try:
+                await client.disconnect()
+            finally:
+                lock.release()
 
     async def download_media_by_message_id(self, message) -> Optional[str]:
         """Скачать медиа по message.telegram_id для ленивой загрузки"""
-        # Найти подходящий клиент (активный)
-        client = None
-        account = None
-        for acc_id, cl in self._clients.items():
-            if cl.is_connected():
-                client = cl
-                account = await sync_to_async(TelegramAccount.objects.get)(id=acc_id)
-                break
+        message_id = getattr(message, 'pk', message)
+        context = await database_sync_to_async(self._telegram_download_context)(message_id)
+        client = self._clients.get(context['account_id'])
 
-        if not client or not account:
+        if not client or not client.is_connected():
             raise Exception("No active Telegram client available")
 
         try:
-            logger.info(f"Downloading media for message {message.id} (telegram_id: {message.telegram_id}) in chat {message.chat.telegram_id}")
+            logger.info(
+                'Downloading media for message %s (telegram_id: %s) in chat %s',
+                context['message_id'], context['telegram_message_id'], context['chat_telegram_id'],
+            )
 
-            # Получить сообщение из Telegram по ID
-            chat_entity = await client.get_entity(message.chat.telegram_id)
+            chat_entity = await client.get_entity(context['chat_telegram_id'])
             logger.info(f"Got chat entity: {chat_entity}")
 
-            telegram_message = await client.get_messages(chat_entity, ids=[message.telegram_id])
+            telegram_message = await client.get_messages(chat_entity, ids=[context['telegram_message_id']])
             logger.info(f"Got messages: {len(telegram_message) if telegram_message else 0}")
 
             if not telegram_message or not telegram_message[0]:
-                raise Exception(f"Message {message.telegram_id} not found in chat {message.chat.telegram_id}")
+                raise Exception(
+                    f"Message {context['telegram_message_id']} not found in chat {context['chat_telegram_id']}"
+                )
 
             telegram_message = telegram_message[0]
             logger.info(f"Message has media: {bool(telegram_message.media)}")
 
             if not telegram_message.media:
-                raise Exception(f"Message {message.telegram_id} has no media")
+                raise Exception(f"Message {context['telegram_message_id']} has no media")
 
-            file_name = self._telegram_media_filename(telegram_message, message.message_type)
-            relative_dir = Path('telegram') / message.message_type / str(message.id)
+            file_name = self._telegram_media_filename(telegram_message, context['message_type'])
+            relative_dir = Path('telegram') / context['message_type'] / str(context['message_id'])
             media_dir = Path(settings.MEDIA_ROOT) / relative_dir
             media_dir.mkdir(parents=True, exist_ok=True)
             local_path = media_dir / file_name
@@ -837,14 +1032,13 @@ class TelegramClientManager:
                 raise RuntimeError('Telegram не вернул содержимое файла.')
 
             relative_path = (relative_dir / file_name).as_posix()
-            message.media_file_path = relative_path
-            message.metadata = {
-                **(message.metadata or {}),
+            metadata = {
+                **context['metadata'],
                 'original_filename': file_name,
                 'media_size': local_path.stat().st_size,
             }
-            await database_sync_to_async(message.save)(
-                update_fields=['media_file_path', 'metadata', 'updated_at']
+            await database_sync_to_async(self._store_downloaded_media)(
+                context['message_id'], relative_path, metadata
             )
 
             return relative_path
@@ -895,7 +1089,13 @@ class TelegramClientManager:
             # Catch up on missed messages
             try:
                 # Store catchup task separately so we can wait for it
-                self._catchup_tasks[account.id] = asyncio.create_task(self._catch_up_history(client, account, force=True))
+                # Telegram's catch_up() has already replayed missed updates. The
+                # history pass is only a safety net and must skip dialogs whose
+                # latest message is already stored; forcing it here caused a
+                # costly scan after every connector restart.
+                self._catchup_tasks[account.id] = asyncio.create_task(
+                    self._catch_up_history(client, account, force=False)
+                )
                 await self._catchup_tasks[account.id]
             except Exception as e:
                  logger.error(f"Failed to catch up history for {account.id}: {e}")
@@ -911,7 +1111,7 @@ class TelegramClientManager:
                     await client.connect()
                     if await client.is_user_authorized():
                         await client.catch_up()
-                        await self.sync_messages_for_account(client, account, force=True)
+                        await self.sync_messages_for_account(client, account, force=False)
         except asyncio.CancelledError:
             logger.info(f"Stopped listening for account {account.id}")
             raise
@@ -1520,7 +1720,13 @@ class TelegramClientManager:
                         account.error_count = 0
                         await database_sync_to_async(account.save)()
 
-                        self._clients[account.id] = client
+                        # QR authentication runs in the web process, while live
+                        # Telegram updates are owned by the dedicated connector.
+                        # Keeping this authenticated client connected here creates
+                        # two connections with the same auth key. Telegram may then
+                        # deliver updates to this client, which has no event handlers,
+                        # until an API call on the connector wakes its connection.
+                        # Persist the StringSession and let the connector reconcile it.
                     else:
                         entry['status'] = 'pending'
 
@@ -1564,7 +1770,10 @@ class TelegramClientManager:
                     except Exception:
                         pass
                 finally:
-                    if entry.get('status') != 'authenticated' and client:
+                    # The QR client is only an authorization transport. It must
+                    # never remain connected after the session has been persisted;
+                    # the connector process is the single owner of live updates.
+                    if client:
                         try:
                             await client.disconnect()
                         except Exception:
@@ -1841,6 +2050,7 @@ class TelegramClientManager:
                 try:
                     chat_entity = dialog.entity
                     chat_id = chat_entity.id
+                    peer_metadata = self._telegram_peer_metadata(chat_entity)
                     safe_title = dialog.title.encode('ascii', 'replace').decode('ascii') if dialog.title else "Unknown"
                     logger.debug(f"Processing dialog: {safe_title} (ID: {chat_id})")
                     
@@ -1857,6 +2067,7 @@ class TelegramClientManager:
                                     'title': dialog.title or "Unknown",
                                     'username': username,
                                     'is_bot': bool(dialog.is_user and getattr(chat_entity, 'bot', False)),
+                                    'metadata': peer_metadata,
                                 }
                             )
                             # Update title and peer kind if changed.
@@ -1868,6 +2079,9 @@ class TelegramClientManager:
                             if chat_obj.is_bot != peer_is_bot:
                                 chat_obj.is_bot = peer_is_bot
                                 update_fields.append('is_bot')
+                            if peer_metadata and not (chat_obj.metadata or {}).get('telegram_peer'):
+                                chat_obj.metadata = {**(chat_obj.metadata or {}), **peer_metadata}
+                                update_fields.append('metadata')
                             if update_fields:
                                 chat_obj.save(update_fields=[*update_fields, 'updated_at'])
                                 
@@ -1896,8 +2110,8 @@ class TelegramClientManager:
                         # logger.debug(f"Chat {chat_id} is up to date (last ID {last_db_id}), skipping messages fetch.")
                         continue
                     
-                    # Fetching logic: Get latest 20 messages for this chat.
-                    # Since we poll every 7s, limit=20 is more than enough coverage and faster.
+                    # Fetch only a small overlap for dialogs that are actually
+                    # behind. Live messages arrive through Telethon events.
                     logger.debug(f"Fetching last 20 messages for chat {chat_id} (reason: last_db_id={last_db_id} vs tg_id={dialog.message.id if dialog.message else 'None'})...")
                     history = await client.get_messages(chat_entity, limit=20)
                     
@@ -1905,12 +2119,13 @@ class TelegramClientManager:
                     
                     new_messages_count = 0
                     for msg in history:
-                        if not msg.message and not msg.media:
+                        if not msg.message and not msg.media and not getattr(msg, 'action', None):
                             continue
 
                         @database_sync_to_async
                         def save_msg(message_data):
                             from django.db import IntegrityError
+                            from .reactions import telegram_reaction_summary
                             try:
                                 # Quick check if exists
                                 if MessageModel.objects.filter(telegram_id=message_data.id, chat=chat_obj).exists():
@@ -1941,7 +2156,14 @@ class TelegramClientManager:
                                     from_user_id=message_data.sender_id,
                                     from_user_name=getattr(dialog, 'title', 'Unknown'), # Fallback
                                     status=MessageModel.MessageStatus.RECEIVED,
-                                    media_caption=getattr(message_data, 'message', None) if msg_type != 'text' else None
+                                    media_caption=getattr(message_data, 'message', None) if msg_type != 'text' else None,
+                                    metadata={
+                                        'reactions': telegram_reaction_summary(
+                                            getattr(message_data, 'reactions', None)
+                                        ),
+                                        'special_content': telegram_special_content(message_data),
+                                        'forward_info': telegram_forward_info(message_data),
+                                    },
                                 )
                                 logger.info(f"Saved NEW message {message_data.id} in chat {chat_id} during sync")
                                 return message_obj
@@ -2144,3 +2366,52 @@ class TelegramClientManager:
                     await self.start_client(account)
             except Exception as e:
                 logger.error(f"Failed to reconcile account {account.id}: {e}")
+
+    async def add_chat_members(self, account_id: int, chat_id: int, users_to_add: list) -> dict:
+        """
+        Добавить пользователей в группу или супергруппу.
+        users_to_add может содержать username ('@username') или номера телефонов.
+        """
+
+        client = self._clients.get(account_id)
+        if not client:
+            return {'success': False, 'error': 'Клиент не запущен. Проверьте подключение аккаунта.'}
+
+        try:
+            # Получаем сущность чата
+            chat_entity = await client.get_entity(chat_id)
+            
+            resolved_users = []
+            for u in users_to_add:
+                try:
+                    # Пытаемся распознать пользователя
+                    resolved_users.append(await client.get_input_entity(u))
+                except Exception as e:
+                    logger.warning(f"Не удалось найти пользователя {u}: {e}")
+
+            if not resolved_users:
+                return {'success': False, 'error': 'Не удалось найти указанных пользователей в Telegram.'}
+
+            # Проверяем тип группы: супергруппа/канал или обычная группа
+            if getattr(chat_entity, 'broadcast', False) or getattr(chat_entity, 'megagroup', False):
+                await client(InviteToChannelRequest(
+                    channel=chat_entity,
+                    users=resolved_users
+                ))
+            else:
+                # В обычные группы пользователей добавляем по одному
+                for user in resolved_users:
+                    await client(AddChatUserRequest(
+                        chat_id=chat_entity.id,
+                        user_id=user,
+                        fwd_limit=50  # Даем доступ к последним 50 сообщениям истории
+                    ))
+
+            return {'success': True}
+
+        except RPCError as e:
+            logger.error(f"Telegram RPC error adding members: {e}")
+            return {'success': False, 'error': f'Ошибка Telegram: {str(e)}'}
+        except Exception as e:
+            logger.exception(f"Error adding members to chat {chat_id}: {e}")
+            return {'success': False, 'error': 'Внутренняя ошибка при добавлении.'}
